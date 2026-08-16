@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Drive — Unified Cloud Filesystem</title>
+  <meta name="description" content="Intelligent desktop filesystem backed by multiple Google Drive accounts with automated capacity planning and physical placement.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand" title="Smart Drive Unified Storage">
+          <div class="brand-logo">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
+              <path d="M12 12v9"></path>
+              <path d="m8 17 4 4 4-4"></path>
+            </svg>
+          </div>
+          <div class="brand-info">
+            <span class="brand-name">Smart Drive</span>
+            <span class="brand-badge"><span class="status-dot online"></span>Active</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div class="search-box" id="searchBox">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="text" id="searchInput" placeholder="Search files, folders, extensions..." autocomplete="off" spellcheck="false">
+          <kbd class="search-kbd" id="searchKbd">Ctrl K</kbd>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <!-- Dual Synchronized Storage Pill -->
+        <div class="storage-pill" id="storagePillBtn" title="Click to view Storage Statistics">
+          <div class="storage-pill-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+              <line x1="6" y1="6" x2="6.01" y2="6"></line>
+              <line x1="6" y1="18" x2="6.01" y2="18"></line>
+            </svg>
+          </div>
+          <div class="storage-pill-text">
+            <span class="pill-label" id="pillLabel">Smart Files: <strong id="logicalSizeVal">0 B</strong></span>
+            <span class="pill-value" id="capacityVal">Loading Cloud Quota...</span>
+          </div>
+          <div class="storage-pill-meter">
+            <div class="storage-pill-bar" id="capacityBar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <!-- Drives Manager Button -->
+        <button id="accountsBtn" class="btn btn-secondary btn-compact" title="Manage Connected Google Drives">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
+          </svg>
+          Drives (<span id="drivesCount">0</span>)
+        </button>
+
+        <!-- Theme Toggle Button -->
+        <button id="themeToggleBtn" class="icon-btn" title="Toggle Light / Dark Theme">
+          <svg class="sun-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="moon-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display: none;">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+
+        <div class="header-divider"></div>
+
+        <!-- New Folder -->
+        <button id="newFolderBtn" class="btn btn-secondary" title="Create New Folder">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"></path>
+            <line x1="12" y1="10" x2="12" y2="16"></line>
+            <line x1="9" y1="13" x2="15" y2="13"></line>
+          </svg>
+          New Folder
+        </button>
+
+        <!-- Upload Buttons -->
+        <div class="upload-btn-group" style="display: flex; gap: 6px;">
+          <button id="uploadBtn" class="btn btn-primary" title="Upload Files">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            Upload
+          </button>
+          <button id="uploadFolderBtn" class="btn btn-secondary" title="Upload an entire local folder">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"></path>
+              <polyline points="12 11 12 17"></polyline>
+              <polyline points="9 14 12 11 15 14"></polyline>
+            </svg>
+            Folder
+          </button>
+        </div>
+        <input type="file" id="fileInput" multiple style="display: none;">
+        <input type="file" id="folderInput" webkitdirectory directory multiple style="display: none;">
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <div class="app-body">
+      <!-- Left Sidebar -->
+      <aside class="app-sidebar">
+        <div class="sidebar-group">
+          <div class="sidebar-heading">SMART DRIVE</div>
+          <nav class="sidebar-nav">
+            <button class="nav-button active" id="navAllFiles">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"></path>
+              </svg>
+              <span>All Files</span>
+            </button>
+            <button class="nav-button" id="navRecent">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+              </svg>
+              <span>Recent Activity</span>
+            </button>
+            <button class="nav-button" id="navTrash">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+              <span>Trash Bin</span>
+            </button>
+          </nav>
+        </div>
+
+        <div class="sidebar-group">
+          <div class="sidebar-heading">FOLDERS</div>
+          <div class="tree-root-container" id="treeContainer">
+            <!-- Dynamic Virtual Tree -->
+          </div>
+        </div>
+
+        <div class="sidebar-group sidebar-drives-group">
+          <div class="sidebar-heading">CONNECTED DRIVES</div>
+          <div class="drives-list-compact" id="drivesSummaryList">
+            <!-- Compact Drives Status -->
+          </div>
+        </div>
+      </aside>
+
+      <!-- Center File Explorer -->
+      <main class="app-main" id="dropZone">
+        <!-- Explorer Toolbar -->
+        <div class="explorer-toolbar">
+          <div class="toolbar-left">
+            <div class="nav-history-btns">
+              <button class="icon-btn" id="navBackBtn" title="Back" disabled>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+              </button>
+              <button class="icon-btn" id="navUpBtn" title="Up to Parent">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
+              </button>
+            </div>
+
+            <!-- Breadcrumbs Trail -->
+            <nav class="breadcrumb-trail" id="breadcrumbs">
+              <span class="crumb active" data-id="root">Smart Drive</span>
+            </nav>
+          </div>
+
+          <div class="toolbar-right">
+            <!-- Selection Actions Pill (Appears when items are selected) -->
+            <div class="selection-actions" id="selectionToolbar" style="display: none;">
+              <span class="selection-count" id="selectionCount">1 item selected</span>
+              <button class="btn btn-secondary btn-xs" id="toolbarDownloadBtn" title="Download Selected">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                Download
+              </button>
+              <button class="btn btn-secondary btn-xs" id="toolbarRenameBtn" title="Rename">Rename</button>
+              <button class="btn btn-secondary btn-xs" id="toolbarRestoreBtn" title="Restore Selected" style="display: none;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><polyline points="3 3 3 8 8 8"></polyline></svg>
+                Restore
+              </button>
+              <button class="btn btn-secondary btn-xs" id="toolbarInfoBtn" title="Properties">Info</button>
+              <button class="btn btn-secondary btn-xs btn-destructive" id="toolbarTrashBtn" title="Move to Trash">Trash</button>
+              <button class="btn btn-secondary btn-xs btn-destructive" id="toolbarPermanentDeleteBtn" title="Delete Permanently" style="display: none;">Delete Forever</button>
+              <button class="icon-btn" id="toolbarClearSelectionBtn" title="Clear selection" style="width:22px; height:22px; padding:0;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+
+            <button id="emptyTrashBtn" class="btn btn-secondary btn-xs btn-destructive" style="display: none;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+              Empty Trash
+            </button>
+
+            <!-- Layout Mode Switcher -->
+            <div class="view-mode-toggle">
+              <button class="icon-btn active" id="viewListBtn" title="List View">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="8" y1="6" x2="21" y2="6"></line>
+                  <line x1="8" y1="12" x2="21" y2="12"></line>
+                  <line x1="8" y1="18" x2="21" y2="18"></line>
+                  <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                  <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                  <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                </svg>
+              </button>
+              <button class="icon-btn" id="viewGridBtn" title="Grid View">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="7" height="7"></rect>
+                  <rect x="14" y="3" width="7" height="7"></rect>
+                  <rect x="14" y="14" width="7" height="7"></rect>
+                  <rect x="3" y="14" width="7" height="7"></rect>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- File View Container -->
+        <div class="files-viewport" id="filesViewport">
+          <!-- Files List / Grid rendered here -->
+          <div class="files-container list-view" id="itemsContainer"></div>
+
+          <!-- Refined Empty State -->
+          <div class="empty-state" id="emptyState" style="display: none;">
+            <div class="empty-state-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3">
+                <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"></path>
+              </svg>
+            </div>
+            <h3 class="empty-state-title">This folder is empty</h3>
+            <p class="empty-state-desc">Drag and drop files here or click Upload.</p>
+          </div>
+        </div>
+
+        <!-- Drag and Drop Overlay -->
+        <div class="drop-overlay" id="dropOverlay">
+          <div class="drop-modal-card">
+            <div class="drop-modal-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+            </div>
+            <h3 class="drop-modal-title">Drop files to upload</h3>
+            <p class="drop-modal-desc">Files will be streamed and placed onto optimal Google Drive storage.</p>
+          </div>
+        </div>
+      </main>
+
+      <!-- Right Properties Inspector Drawer -->
+      <aside class="app-inspector" id="inspectorDrawer" style="display: none;">
+        <div class="inspector-header">
+          <h3>File Details</h3>
+          <button id="closeInspectorBtn" class="icon-btn" title="Close Details">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+        <div class="inspector-body" id="inspectorContent">
+          <!-- Populated dynamically -->
+        </div>
+      </aside>
+    </div>
+
+    <!-- Floating Bottom-Right Upload Toast -->
+    <div class="upload-activity-toast" id="uploadToast" style="display: none;">
+      <div class="upload-toast-header">
+        <span class="upload-toast-title" id="uploadToastTitle">Uploading file...</span>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="upload-toast-pct" id="uploadToastPct">0%</span>
+          <button class="icon-btn" id="cancelUploadBtn" title="Cancel upload" style="width: 20px; height: 20px; padding: 0;">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+      </div>
+      <div class="upload-toast-bar-container">
+        <div class="upload-toast-bar" id="uploadToastBar" style="width: 0%"></div>
+      </div>
+      <div class="upload-toast-footer">
+        <span class="upload-toast-meta" id="uploadToastMeta">0 B / 0 B</span>
+        <span class="upload-toast-speed" id="uploadToastSpeed">Calculating...</span>
+      </div>
+    </div>
+
+    <!-- Context Menu -->
+    <div class="context-menu" id="contextMenu" style="display: none;">
+      <div class="context-item" id="ctxOpen">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+        <span>Open</span>
+      </div>
+      <div class="context-item" id="ctxDownload">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        <span>Download</span>
+      </div>
+      <div class="context-item" id="ctxRestore" style="display: none;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><polyline points="3 3 3 8 8 8"></polyline></svg>
+        <span>Restore</span>
+      </div>
+      <div class="context-divider" id="ctxDivider1"></div>
+      <div class="context-item" id="ctxRename">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
+        <span>Rename</span>
+        <kbd>F2</kbd>
+      </div>
+      <div class="context-item" id="ctxInfo">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+        <span>Properties</span>
+      </div>
+      <div class="context-divider" id="ctxDivider2"></div>
+      <div class="context-item context-destructive" id="ctxTrash">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        <span>Move to Trash</span>
+        <kbd>Del</kbd>
+      </div>
+      <div class="context-item context-destructive" id="ctxPermanentDelete" style="display: none;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        <span>Delete Forever</span>
+        <kbd>Del</kbd>
+      </div>
+    </div>
+
+    <!-- Rename Modal -->
+    <div class="modal-overlay" id="renameModal" style="display: none;">
+      <div class="modal-dialog modal-dialog-sm">
+        <div class="modal-dialog-header">
+          <h3>Rename Item</h3>
+          <button class="icon-btn" id="closeRenameModalBtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+        <div class="modal-dialog-body">
+          <label class="dialog-field-label" for="renameInput">New Name</label>
+          <input type="text" id="renameInput" class="dialog-input" autocomplete="off">
+        </div>
+        <div class="modal-dialog-footer">
+          <button class="btn btn-secondary" id="cancelRenameBtn">Cancel</button>
+          <button class="btn btn-primary" id="confirmRenameBtn">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connected Accounts Management Modal -->
+    <div class="modal-overlay" id="accountsModal" style="display: none;">
+      <div class="modal-dialog modal-dialog-lg">
+        <div class="modal-dialog-header">
+          <div class="modal-dialog-title-group">
+            <h3>Google Drive Accounts</h3>
+            <p>Physical cloud storage backing your Smart Drive virtual filesystem.</p>
+          </div>
+          <button class="icon-btn" id="closeAccountsModalBtn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+        <div class="modal-dialog-body">
+          <div class="modal-actions-bar" style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button id="importFilesBtn" class="btn btn-secondary btn-compact" title="Scan and import files uploaded directly on Google Drive into Smart Drive">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              Scan & Import Files
+            </button>
+            <button id="syncAllBtn" class="btn btn-secondary btn-compact">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              Sync Quotas
+            </button>
+            <button id="connectNewAccountBtn" class="btn btn-primary btn-compact">
+              + Connect Google Account
+            </button>
+          </div>
+          <div class="table-container">
+            <table class="native-table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th>Status</th>
+                  <th>Cloud Quota (Used / Total)</th>
+                  <th>Migration Lock</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="accountsTableBody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Storage Statistics Modal -->
+    <div class="modal-overlay" id="statsModal" style="display: none;">
+      <div class="modal-dialog modal-dialog-lg">
+        <div class="modal-dialog-header">
+          <div class="modal-dialog-title-group">
+            <h3>Storage Statistics & Sync</h3>
+            <p>Unified comparison of logical virtual filesystem storage vs physical Google Drive storage.</p>
+          </div>
+          <button class="icon-btn" id="closeStatsModalBtn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+        <div class="modal-dialog-body" id="statsModalBody">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
