@@ -4,6 +4,7 @@ import { DomainEventBus } from '../events/event-bus.js';
 import { VirtualFilesystemService } from '../vfs/vfs.service.js';
 import { Readable } from 'node:stream';
 import { UploadConflictAction } from './transfer.types.js';
+import { ResourceLimits } from '../../config/resource-limits.js';
 
 export interface QueuedUploadItem {
   id: string;
@@ -38,7 +39,7 @@ export interface QueuedUploadBatch {
 export class UploadQueue {
   private batches = new Map<string, QueuedUploadBatch>();
   private activeUploads = 0;
-  private maxConcurrency = 3;
+  private maxConcurrency = ResourceLimits.MAX_CONCURRENT_UPLOADS;
   private queue: Array<{ batchId: string; itemIndex: number }> = [];
   private vfsService?: VirtualFilesystemService;
   private isProcessing = false;
@@ -49,7 +50,7 @@ export class UploadQueue {
     private operationRepo: StorageOperationRepository,
     private eventBus: DomainEventBus,
     vfsServiceOrConcurrency?: VirtualFilesystemService | number,
-    maxConcurrency = 3
+    maxConcurrency = ResourceLimits.MAX_CONCURRENT_UPLOADS
   ) {
     if (typeof vfsServiceOrConcurrency === 'number') {
       this.maxConcurrency = vfsServiceOrConcurrency;

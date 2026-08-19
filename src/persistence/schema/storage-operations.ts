@@ -32,6 +32,7 @@ export const storageOperations = sqliteTable(
         'PENDING',
         'RESERVED',
         'EXECUTING',
+        'WAITING_FOR_SOURCE',
         'VERIFYING',
         'SWITCHING',
         'COMPLETED',

@@ -245,7 +245,3 @@ npm run test:watch
 > ⚠️ **Never commit your `.env` file.** If you accidentally do, rotate your Google OAuth credentials and encryption key immediately.
 
 ---
-
-## 📄 License
-
-[MIT](LICENSE)

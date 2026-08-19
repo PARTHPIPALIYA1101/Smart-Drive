@@ -22,6 +22,7 @@ import { StorageStatsService } from '../domain/stats/stats.service.js';
 import { GoogleOAuthService } from '../providers/google-drive/auth/google-oauth.service.js';
 import { DomainEventBus } from '../domain/events/event-bus.js';
 import { UploadQueue } from '../domain/transfer/upload-queue.js';
+import { TransferSessionManager } from '../domain/transfer/transfer-session-manager.js';
 import { SmartDriveError } from '../domain/errors.js';
 
 export interface AppServices {
@@ -43,6 +44,7 @@ export interface AppServices {
   operationRepo: StorageOperationRepository;
   eventBus?: DomainEventBus;
   uploadQueue?: UploadQueue;
+  sessionManager?: TransferSessionManager;
 }
 
 export function createServer(services: AppServices): FastifyInstance {
@@ -275,6 +277,145 @@ export function createServer(services: AppServices): FastifyInstance {
     return reply.send({ success: true, data: plan });
   });
 
+  // Resumable upload endpoints (Option C: Browser-Session-Driven Resumable Uploads)
+  app.post('/api/transfer/resumable/init', async (req, reply) => {
+    const body = req.body as {
+      name: string;
+      parentId?: number | null;
+      mimeType?: string;
+      size: number;
+      conflictAction?: any;
+      relativePath?: string;
+      batchId?: string;
+    };
+
+    const parentId = normalizeParentId(body.parentId);
+    const result = await services.transferService.initResumableUpload({
+      name: body.name,
+      parentId,
+      mimeType: body.mimeType || 'application/octet-stream',
+      size: body.size || 0,
+      conflictAction: body.conflictAction,
+      relativePath: body.relativePath,
+      batchId: body.batchId,
+    });
+
+    return reply.status(201).send({ success: true, data: result });
+  });
+
+  const handleResumableStream = async (req: any, reply: any) => {
+    const { id } = req.params as { id: string };
+    const query = (req.query || {}) as Record<string, any>;
+    const startByte = parseInt(query.startByte || '0', 10);
+
+    if (services.sessionManager) {
+      services.sessionManager.handleReconnect(id);
+    }
+
+    const abortController = new AbortController();
+    req.raw.on('close', () => {
+      if (!req.raw.complete) {
+        abortController.abort();
+        if (services.sessionManager) {
+          services.sessionManager.handleDisconnect(id);
+        }
+      }
+    });
+
+    try {
+      const result = await services.transferService.resumeUploadStream({
+        operationId: id,
+        stream: req.raw,
+        startByte,
+        abortSignal: abortController.signal,
+      });
+      return reply.send({ success: true, data: result });
+    } catch (err: any) {
+      if (req.raw.destroyed || abortController.signal.aborted) {
+        return reply.status(499).send({ success: false, error: { message: 'Client disconnected, session preserved' } });
+      }
+      throw err;
+    }
+  };
+
+  app.put('/api/transfer/resumable/:id/stream', handleResumableStream);
+  app.post('/api/transfer/resumable/:id/stream', handleResumableStream);
+
+  app.get('/api/transfer/resumable/:id/offset', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const op = services.operationRepo.findById(id);
+    if (!op) {
+      return reply.status(404).send({ success: false, error: { message: 'Operation not found' } });
+    }
+
+    let planData: any = {};
+    try {
+      planData = op.planContext ? JSON.parse(op.planContext) : {};
+    } catch {}
+
+    let currentOffset = planData.bytesCompleted || 0;
+    const destDriveId = op.destDriveId || planData.destDriveId;
+    const sessionUri = planData.resumableSessionUri;
+    const totalBytes = op.requestedBytes || planData.fileSize || 0;
+
+    if (destDriveId && sessionUri && (services.transferService as any).providerFactory) {
+      try {
+        const provider = (services.transferService as any).providerFactory.getProvider(destDriveId);
+        if (provider.queryResumableOffset) {
+          currentOffset = await provider.queryResumableOffset(sessionUri, totalBytes);
+          if (services.sessionManager) {
+            services.sessionManager.updateProgress(id, currentOffset);
+          }
+        }
+      } catch (err: any) {
+        if (err.message?.includes('expired or invalid')) {
+          return reply.status(410).send({
+            success: false,
+            error: { code: 'SESSION_EXPIRED', message: 'Upload session expired on provider' },
+          });
+        }
+      }
+    }
+
+    return reply.send({
+      success: true,
+      data: {
+        operationId: id,
+        offset: currentOffset,
+        fileSize: totalBytes,
+        status: op.status,
+        fileName: planData.fileName || 'Untitled',
+        parentId: planData.parentId ?? null,
+        relativePath: planData.relativePath || planData.fileName,
+      },
+    });
+  });
+
+  app.post('/api/transfer/resumable/:id/cancel', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (services.sessionManager) {
+      await services.sessionManager.cancelUpload(id);
+    } else {
+      services.operationRepo.updateStatus(id, 'CANCELLED', 'USER_CANCELLED', 'Cancelled by user');
+    }
+    return reply.send({ success: true });
+  });
+
+  app.post('/api/operations/:id/reconnect', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (services.sessionManager) {
+      services.sessionManager.handleReconnect(id);
+    }
+    return reply.send({ success: true });
+  });
+
+  app.post('/api/operations/reconnect', async (_req, reply) => {
+    if (services.sessionManager) {
+      services.sessionManager.handleReconnect();
+    }
+    return reply.send({ success: true });
+  });
+
   app.post('/api/transfer/upload', async (req, reply) => {
     const query = (req.query || {}) as Record<string, any>;
     const data = await req.file();
@@ -285,21 +426,28 @@ export function createServer(services: AppServices): FastifyInstance {
     const fields = (data.fields || {}) as Record<string, any>;
     const parentId = normalizeParentId(fields.parentId?.value ?? query.parentId);
     const conflictAction = (fields.conflictAction?.value ?? query.conflictAction) as any;
+    const declaredSize = parseInt(fields.size?.value ?? query.size ?? '0', 10);
 
-    // Buffer to get exact byte size for direct upload placement calculation
-    const chunks: Buffer[] = [];
-    for await (const chunk of data.file) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    let stream: any = data.file;
+    let size = declaredSize;
+
+    if (size <= 0) {
+      const chunks: Buffer[] = [];
+      for await (const chunk of data.file) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const fullBuffer = Buffer.concat(chunks);
+      size = fullBuffer.length;
+      const { Readable } = await import('node:stream');
+      stream = Readable.from(fullBuffer);
     }
-    const fullBuffer = Buffer.concat(chunks);
 
-    const { Readable } = await import('node:stream');
     const result = await services.transferService.uploadFile({
       name: data.filename,
       parentId,
       mimeType: data.mimetype || 'application/octet-stream',
-      size: fullBuffer.length,
-      stream: Readable.from(fullBuffer),
+      size,
+      stream,
       conflictAction,
     });
 
@@ -358,7 +506,26 @@ export function createServer(services: AppServices): FastifyInstance {
   app.get('/api/operations/active', async (req, reply) => {
     const activeBatches = services.uploadQueue ? services.uploadQueue.getActiveBatches() : [];
     const activeOps = services.operationRepo.findIncompleteOperations();
-    return reply.send({ success: true, data: { activeBatches, activeOperations: activeOps } });
+    const activeSessions = services.sessionManager ? services.sessionManager.getActiveSessions() : [];
+    return reply.send({
+      success: true,
+      data: {
+        activeBatches,
+        activeOperations: activeOps,
+        activeSessions: activeSessions.map((s) => ({
+          operationId: s.operationId,
+          fileName: s.fileName,
+          relativePath: s.relativePath,
+          fileSize: s.fileSize,
+          bytesCompleted: s.bytesCompleted,
+          status: s.status,
+          destDriveId: s.destDriveId,
+          parentId: s.parentId,
+          resumableSessionUri: s.resumableSessionUri,
+          batchId: s.batchId,
+        })),
+      },
+    });
   });
 
   app.post('/api/transfer/batch/cancel', async (req, reply) => {

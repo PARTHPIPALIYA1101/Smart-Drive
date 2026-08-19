@@ -122,10 +122,9 @@ export class GoogleDriveProvider implements IStorageProvider {
     throw new Error(`Request to ${url} failed after ${maxRetries} attempts`);
   }
 
-  async uploadStream(stream: Readable, options: ProviderUploadOptions): Promise<ProviderFileMetadata> {
+  async createResumableSession(options: ProviderUploadOptions): Promise<string> {
     const token = await this.oauthService.getValidAccessToken(this.accountId);
 
-    // 1. Initialize Resumable Upload Session
     const initResponse = await fetch(
       `${GoogleDriveProvider.UPLOAD_BASE}/files?uploadType=resumable`,
       {
@@ -134,7 +133,7 @@ export class GoogleDriveProvider implements IStorageProvider {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json; charset=UTF-8',
           'X-Upload-Content-Type': options.mimeType,
-          ...(options.size ? { 'X-Upload-Content-Length': options.size.toString() } : {}),
+          ...(options.size !== undefined ? { 'X-Upload-Content-Length': options.size.toString() } : {}),
         },
         body: JSON.stringify({
           name: options.filename,
@@ -153,17 +152,66 @@ export class GoogleDriveProvider implements IStorageProvider {
       throw new Error('Google Drive upload session URI was not returned in Location header');
     }
 
-    // 2. Stream Data to Resumable Session URI
+    return sessionUri;
+  }
+
+  async queryResumableOffset(sessionUri: string, totalBytes: number): Promise<number> {
+    try {
+      const response = await fetch(sessionUri, {
+        method: 'PUT',
+        headers: {
+          'Content-Range': `bytes */${totalBytes}`,
+        },
+      });
+
+      if (response.status === 308) {
+        const range = response.headers.get('range');
+        if (range) {
+          const match = range.match(/bytes=0-(\d+)/);
+          if (match) {
+            return parseInt(match[1], 10) + 1;
+          }
+        }
+        return 0;
+      } else if (response.status === 200 || response.status === 201) {
+        return totalBytes;
+      } else if (response.status === 404 || response.status === 410) {
+        throw new Error(`Google Drive resumable session expired or invalid: ${response.status}`);
+      } else {
+        throw new Error(`Failed to query Google Drive resumable offset: ${response.status}`);
+      }
+    } catch (err: any) {
+      if (err.message.includes('expired or invalid')) throw err;
+      throw new Error(`Failed to query resumable session: ${err.message}`);
+    }
+  }
+
+  async uploadStreamToSession(
+    sessionUri: string,
+    stream: Readable,
+    options: {
+      startByte: number;
+      totalBytes: number;
+      mimeType: string;
+      filename?: string;
+      abortSignal?: AbortSignal;
+      onProgress?: (bytesUploaded: number) => void;
+    }
+  ): Promise<ProviderFileMetadata> {
+    const contentLength = Math.max(0, options.totalBytes - options.startByte);
+    const contentRange = `bytes ${options.startByte}-${options.totalBytes - 1}/${options.totalBytes}`;
     const bodyStream = (Readable as any).toWeb ? (Readable as any).toWeb(stream) : stream;
 
     const uploadResponse = await fetch(sessionUri, {
       method: 'PUT',
       headers: {
         'Content-Type': options.mimeType,
-        ...(options.size ? { 'Content-Length': options.size.toString() } : {}),
+        'Content-Length': contentLength.toString(),
+        'Content-Range': contentRange,
       },
       body: bodyStream as any,
       duplex: 'half',
+      signal: options.abortSignal,
     });
 
     if (!uploadResponse.ok) {
@@ -179,16 +227,41 @@ export class GoogleDriveProvider implements IStorageProvider {
       md5Checksum?: string;
     };
 
-    const actualSize = result.size ? parseInt(result.size, 10) : (options.size ?? 0);
+    const actualSize = result.size ? parseInt(result.size, 10) : options.totalBytes;
 
     return {
       providerFileId: result.id,
-      filename: result.name,
+      filename: result.name || options.filename || 'Untitled',
       size: actualSize,
       mimeType: result.mimeType || options.mimeType,
       checksum: result.md5Checksum || null,
       checksumType: 'MD5',
     };
+  }
+
+  async abortSession(sessionUri: string): Promise<void> {
+    try {
+      await fetch(sessionUri, {
+        method: 'DELETE',
+        headers: {
+          'Content-Length': '0',
+        },
+      });
+    } catch {
+      // Best-effort session abort
+    }
+  }
+
+  async uploadStream(stream: Readable, options: ProviderUploadOptions): Promise<ProviderFileMetadata> {
+    const sessionUri = await this.createResumableSession(options);
+    return this.uploadStreamToSession(sessionUri, stream, {
+      startByte: 0,
+      totalBytes: options.size ?? 0,
+      mimeType: options.mimeType,
+      filename: options.filename,
+      abortSignal: options.abortSignal,
+      onProgress: options.onProgress,
+    });
   }
 
   async downloadStream(providerFileId: string, options?: { exportMimeType?: string }): Promise<Readable> {

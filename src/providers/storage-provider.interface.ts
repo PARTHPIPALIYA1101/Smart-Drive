@@ -23,6 +23,7 @@ export interface ProviderUploadOptions {
   mimeType: string;
   size?: number;
   onProgress?: (bytesUploaded: number, totalBytes?: number) => void;
+  abortSignal?: AbortSignal;
 }
 
 export interface ProviderQuota {
@@ -33,6 +34,7 @@ export interface ProviderQuota {
 
 export interface DownloadStreamOptions {
   exportMimeType?: string;
+  abortSignal?: AbortSignal;
 }
 
 export interface IStorageProvider {
@@ -40,6 +42,38 @@ export interface IStorageProvider {
    * Uploads a data stream to the physical provider.
    */
   uploadStream(stream: Readable, options: ProviderUploadOptions): Promise<ProviderFileMetadata>;
+
+  /**
+   * Creates a dedicated resumable upload session on the physical provider.
+   */
+  createResumableSession?(options: ProviderUploadOptions): Promise<string>;
+
+  /**
+   * Queries the provider's resumable session for the exact byte offset already uploaded.
+   */
+  queryResumableOffset?(sessionUri: string, totalBytes: number): Promise<number>;
+
+  /**
+   * Uploads a stream chunk / remaining slice to an existing resumable session starting at offset.
+   */
+  uploadStreamToSession?(
+    sessionUri: string,
+    stream: Readable,
+    options: {
+      startByte: number;
+      totalBytes: number;
+      mimeType: string;
+      filename?: string;
+      abortSignal?: AbortSignal;
+      onProgress?: (bytesUploaded: number) => void;
+      isPartial?: boolean;
+    }
+  ): Promise<ProviderFileMetadata>;
+
+  /**
+   * Aborts / cancels an active resumable upload session on the physical provider.
+   */
+  abortSession?(sessionUri: string): Promise<void>;
 
   /**
    * Streams a file down from the physical provider.

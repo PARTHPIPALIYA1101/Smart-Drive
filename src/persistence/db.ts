@@ -8,6 +8,7 @@ export interface DatabaseConnection {
   sqlite: Database.Database;
   db: AppDatabase;
   close: () => void;
+  checkpoint: (mode?: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE') => void;
 }
 
 export function createDatabaseConnection(dbPath = './smart_drive.db'): DatabaseConnection {
@@ -18,13 +19,26 @@ export function createDatabaseConnection(dbPath = './smart_drive.db'): DatabaseC
   sqlite.pragma('foreign_keys = ON');
   sqlite.pragma('busy_timeout = 5000');
   sqlite.pragma('synchronous = NORMAL');
+  sqlite.pragma('wal_autocheckpoint = 1000');
 
   const db = drizzle(sqlite, { schema });
+
+  const checkpoint = (mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'PASSIVE') => {
+    try {
+      sqlite.pragma(`wal_checkpoint(${mode})`);
+    } catch {
+      // Best-effort checkpoint
+    }
+  };
 
   return {
     sqlite,
     db,
-    close: () => sqlite.close(),
+    close: () => {
+      checkpoint('TRUNCATE');
+      sqlite.close();
+    },
+    checkpoint,
   };
 }
 

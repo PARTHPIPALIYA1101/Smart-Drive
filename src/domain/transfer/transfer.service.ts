@@ -16,6 +16,9 @@ import {
   FolderUploadPlanResult,
   FolderFilePlacement,
   FolderFileItem,
+  InitResumableUploadInput,
+  InitResumableUploadResult,
+  ResumeUploadStreamInput,
 } from './transfer.types.js';
 import {
   EntityNotFoundError,
@@ -23,6 +26,7 @@ import {
   DriveUnavailableError,
 } from '../errors.js';
 import { DuplicateSiblingError, InvalidParentError } from '../vfs/vfs.service.js';
+import { TransferSessionManager } from './transfer-session-manager.js';
 
 export class TransferService {
   constructor(
@@ -33,7 +37,8 @@ export class TransferService {
     private reservationRepo: StorageReservationRepository,
     private capacityService: CapacityService,
     private providerFactory: IProviderFactory,
-    private eventBus?: DomainEventBus
+    private eventBus?: DomainEventBus,
+    private sessionManager?: TransferSessionManager
   ) {}
 
   private normalizeParentId(parentId: number | null | undefined): number | null {
@@ -138,9 +143,9 @@ export class TransferService {
   }
 
   /**
-   * Uploads a file via direct placement (selecting the Drive with MAX_USABLE_FREE_SPACE).
+   * Initializes a resumable upload operation and reserves drive capacity.
    */
-  async uploadFile(input: UploadFileInput): Promise<FileTransferResult> {
+  async initResumableUpload(input: InitResumableUploadInput): Promise<InitResumableUploadResult> {
     const normParentId = this.normalizeParentId(input.parentId);
     let validName = PathUtils.validateNodeName(input.name);
 
@@ -166,7 +171,6 @@ export class TransferService {
       const conflictAction = input.conflictAction || 'FAIL';
 
       if (conflictAction === 'SKIP') {
-        // Safe retry / skip: if identical active file exists, return it
         const loc = this.locationRepo.findActiveByFileId(existingSibling.id);
         const op: any = {
           id: `OP-SKIPPED-${existingSibling.id}`,
@@ -177,16 +181,17 @@ export class TransferService {
           createdAt: Date.now(),
         };
         return {
+          operationId: op.id,
+          destDriveId: loc?.googleAccountId || 0,
+          startByte: existingSibling.size,
+          skipped: true,
           file: existingSibling,
           location: loc || ({} as any),
           operation: op,
-          skipped: true,
         };
       } else if (conflictAction === 'REPLACE') {
-        // Physically delete existing file before uploading replacement
         await this.deleteFilePhysically(existingSibling.id);
       } else if (conflictAction === 'RENAME') {
-        // Generate non-conflicting name (e.g. filename (1).ext)
         const dotIdx = validName.lastIndexOf('.');
         const base = dotIdx !== -1 ? validName.slice(0, dotIdx) : validName;
         const ext = dotIdx !== -1 ? validName.slice(dotIdx) : '';
@@ -213,7 +218,6 @@ export class TransferService {
       );
     }
 
-    // Pick Drive with maximum usable free space
     candidateDrives.sort((a, b) => b.usableSpace - a.usableSpace);
     const selectedDrive = candidateDrives[0];
 
@@ -231,6 +235,13 @@ export class TransferService {
         policy: 'MAX_USABLE_FREE_SPACE',
         selectedDriveId: selectedDrive.accountId,
         usableBefore: selectedDrive.usableSpace,
+        fileName: validName,
+        relativePath: input.relativePath || validName,
+        parentId: normParentId,
+        fileSize: input.size,
+        mimeType: input.mimeType,
+        batchId: input.batchId,
+        conflictAction: input.conflictAction,
       }),
       createdAt: now,
     });
@@ -243,69 +254,244 @@ export class TransferService {
       throw err;
     }
 
-    this.operationRepo.updateStatus(opId, 'EXECUTING');
-    this.eventBus?.publish('UPLOAD_PROGRESS', { operationId: opId, status: 'EXECUTING', filename: validName });
-
-    // 5. Execute Physical Upload Stream
-    let providerFileMetadata;
-    try {
-      const provider = this.providerFactory.getProvider(selectedDrive.accountId);
-      providerFileMetadata = await provider.uploadStream(input.stream, {
-        filename: validName,
-        mimeType: input.mimeType,
-        size: input.size,
-      });
-    } catch (uploadError) {
-      // Rollback on upload failure
-      this.reservationRepo.releaseByOperationId(opId);
-      const errMsg = uploadError instanceof Error ? uploadError.message : 'Unknown upload error';
-      this.operationRepo.updateStatus(
-        opId,
-        'FAILED',
-        'UPLOAD_FAILED',
-        errMsg
-      );
-      this.eventBus?.publish('UPLOAD_FAILED', { operationId: opId, error: errMsg });
-      throw uploadError;
+    // 5. Initialize Resumable Session on Provider
+    const provider = this.providerFactory.getProvider(selectedDrive.accountId);
+    let sessionUri: string | undefined;
+    if (provider.createResumableSession) {
+      try {
+        sessionUri = await provider.createResumableSession({
+          filename: validName,
+          mimeType: input.mimeType,
+          size: input.size,
+        });
+      } catch (sessionErr) {
+        this.reservationRepo.releaseByOperationId(opId);
+        const errMsg = sessionErr instanceof Error ? sessionErr.message : 'Failed to init session';
+        this.operationRepo.updateStatus(opId, 'FAILED', 'UPLOAD_FAILED', errMsg);
+        this.eventBus?.publish('UPLOAD_FAILED', { operationId: opId, error: errMsg });
+        throw sessionErr;
+      }
     }
 
-    // 6. Record in Virtual Filesystem & Physical Locations
-    const file = this.fileRepo.insert({
-      name: validName,
-      parentId: normParentId,
-      isFolder: false,
-      mimeType: providerFileMetadata.mimeType,
-      size: providerFileMetadata.size,
-      lifecycleStatus: 'ACTIVE',
-      createdAt: now,
-      updatedAt: now,
+    this.operationRepo.updateStatus(opId, 'EXECUTING');
+    this.operationRepo.updatePlanContext(
+      opId,
+      JSON.stringify({
+        policy: 'MAX_USABLE_FREE_SPACE',
+        selectedDriveId: selectedDrive.accountId,
+        usableBefore: selectedDrive.usableSpace,
+        fileName: validName,
+        relativePath: input.relativePath || validName,
+        parentId: normParentId,
+        fileSize: input.size,
+        mimeType: input.mimeType,
+        batchId: input.batchId,
+        conflictAction: input.conflictAction,
+        resumableSessionUri: sessionUri,
+        destDriveId: selectedDrive.accountId,
+      })
+    );
+
+    if (this.sessionManager) {
+      this.sessionManager.registerSession({
+        operationId: opId,
+        destDriveId: selectedDrive.accountId,
+        fileName: validName,
+        relativePath: input.relativePath || validName,
+        parentId: normParentId,
+        fileSize: input.size,
+        mimeType: input.mimeType,
+        resumableSessionUri: sessionUri,
+        batchId: input.batchId,
+        conflictAction: input.conflictAction,
+      });
+    }
+
+    this.eventBus?.publish('UPLOAD_PROGRESS', {
+      operationId: opId,
+      status: 'EXECUTING',
+      filename: validName,
+      bytesCompleted: 0,
+      totalBytes: input.size,
     });
 
-    const location = this.locationRepo.insert({
-      fileId: file.id,
-      googleAccountId: selectedDrive.accountId,
-      providerFileId: providerFileMetadata.providerFileId,
-      status: 'ACTIVE',
-      size: providerFileMetadata.size,
-      mimeType: providerFileMetadata.mimeType,
-      checksum: providerFileMetadata.checksum,
-      checksumType: providerFileMetadata.checksumType,
-      createdAt: now,
-    });
+    return {
+      operationId: opId,
+      destDriveId: selectedDrive.accountId,
+      resumableSessionUri: sessionUri,
+      startByte: 0,
+    };
+  }
 
-    // 7. Update Drive Quota in DB & Commit Reservation
-    const driveAcc = this.accountRepo.findById(selectedDrive.accountId);
+  /**
+   * Resumes streaming from a specific byte offset into an active resumable upload session.
+   */
+  async resumeUploadStream(input: ResumeUploadStreamInput): Promise<FileTransferResult> {
+    const op = this.operationRepo.findById(input.operationId);
+    if (!op) {
+      throw new EntityNotFoundError('Upload operation', input.operationId as any);
+    }
+
+    if (op.status === 'COMPLETED' && op.fileId) {
+      const file = this.fileRepo.findById(op.fileId);
+      const loc = this.locationRepo.findActiveByFileId(op.fileId);
+      return {
+        file: file!,
+        location: loc || ({} as any),
+        operation: op,
+      };
+    }
+
+    if (op.status === 'CANCELLED') {
+      throw new Error(`Upload operation ${input.operationId} was cancelled`);
+    }
+
+    let planData: any = {};
+    try {
+      planData = op.planContext ? JSON.parse(op.planContext) : {};
+    } catch {}
+
+    const destDriveId = op.destDriveId || planData.destDriveId;
+    const provider = this.providerFactory.getProvider(destDriveId);
+    const sessionUri = planData.resumableSessionUri;
+    const filename = planData.fileName || 'Untitled';
+    const mimeType = planData.mimeType || 'application/octet-stream';
+    const totalBytes = op.requestedBytes || planData.fileSize || 0;
+    const normParentId = planData.parentId !== undefined ? planData.parentId : null;
+
+    if (this.sessionManager) {
+      this.sessionManager.handleReconnect(input.operationId);
+    }
+
+    let providerMetadata: any;
+    try {
+      if (sessionUri && provider.uploadStreamToSession) {
+        providerMetadata = await provider.uploadStreamToSession(sessionUri, input.stream, {
+          startByte: input.startByte,
+          totalBytes,
+          mimeType,
+          filename,
+          abortSignal: input.abortSignal,
+          isPartial: input.isPartial,
+          onProgress: (bytesUploaded) => {
+            if (this.sessionManager) {
+              this.sessionManager.updateProgress(input.operationId, bytesUploaded);
+            }
+            if (input.onProgress) {
+              input.onProgress(bytesUploaded);
+            }
+            this.eventBus?.publish('UPLOAD_PROGRESS', {
+              operationId: input.operationId,
+              status: 'EXECUTING',
+              filename,
+              bytesCompleted: bytesUploaded,
+              totalBytes,
+            });
+          },
+        });
+      } else {
+        providerMetadata = await provider.uploadStream(input.stream, {
+          filename,
+          mimeType,
+          size: totalBytes,
+          abortSignal: input.abortSignal,
+          onProgress: (bytesUploaded) => {
+            if (this.sessionManager) {
+              this.sessionManager.updateProgress(input.operationId, bytesUploaded);
+            }
+            if (input.onProgress) {
+              input.onProgress(bytesUploaded);
+            }
+          },
+        });
+      }
+    } catch (uploadErr) {
+      if (this.sessionManager) {
+        this.sessionManager.handleDisconnect(input.operationId);
+      } else {
+        this.reservationRepo.releaseByOperationId(input.operationId);
+        this.operationRepo.updateStatus(
+          input.operationId,
+          'FAILED',
+          'UPLOAD_FAILED',
+          uploadErr instanceof Error ? uploadErr.message : 'Unknown upload error'
+        );
+        this.eventBus?.publish('UPLOAD_FAILED', {
+          operationId: input.operationId,
+          error: uploadErr instanceof Error ? uploadErr.message : 'Unknown upload error',
+        });
+      }
+      throw uploadErr;
+    }
+
+    // Check if this was a partial chunk / slice upload
+    const isCompleted = input.isPartial !== true || providerMetadata.checksum !== null || (totalBytes > 0 && providerMetadata.size >= totalBytes);
+
+    if (!isCompleted) {
+      // Partial slice received: update progress and keep session alive in EXECUTING state
+      const updatedOp = this.operationRepo.updatePlanContext(
+        input.operationId,
+        JSON.stringify({
+          ...planData,
+          bytesCompleted: providerMetadata.size,
+        })
+      );
+      return {
+        file: null as any,
+        location: null as any,
+        operation: updatedOp || op,
+      };
+    }
+
+    // Full upload complete: record in virtual filesystem and physical locations
+    let file = planData.smartFileId ? this.fileRepo.findById(planData.smartFileId) : undefined;
+    const now = Date.now();
+
+    if (!file) {
+      file = this.fileRepo.insert({
+        name: filename,
+        parentId: normParentId,
+        isFolder: false,
+        mimeType: providerMetadata.mimeType || mimeType,
+        size: providerMetadata.size || totalBytes,
+        lifecycleStatus: 'ACTIVE',
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    let location = this.locationRepo.findActiveByFileId(file.id);
+    if (!location) {
+      location = this.locationRepo.insert({
+        fileId: file.id,
+        googleAccountId: destDriveId,
+        providerFileId: providerMetadata.providerFileId,
+        status: 'ACTIVE',
+        size: providerMetadata.size || totalBytes,
+        mimeType: providerMetadata.mimeType || mimeType,
+        checksum: providerMetadata.checksum,
+        checksumType: providerMetadata.checksumType || 'MD5',
+        createdAt: now,
+      });
+    }
+
+    // Update Drive capacity
+    const driveAcc = this.accountRepo.findById(destDriveId);
     if (driveAcc) {
       this.accountRepo.updateCapacity(
-        selectedDrive.accountId,
+        destDriveId,
         driveAcc.totalSpace,
-        driveAcc.usedSpace + providerFileMetadata.size
+        driveAcc.usedSpace + (providerMetadata.size || totalBytes)
       );
-      this.eventBus?.publish('DRIVE_QUOTA_UPDATED', { accountId: selectedDrive.accountId });
+      this.eventBus?.publish('DRIVE_QUOTA_UPDATED', { accountId: destDriveId });
     }
 
-    this.reservationRepo.commitByOperationId(opId);
-    const completedOp = this.operationRepo.updateStatus(opId, 'COMPLETED')!;
+    this.reservationRepo.commitByOperationId(input.operationId);
+    const completedOp = this.operationRepo.updateStatus(input.operationId, 'COMPLETED')!;
+
+    if (this.sessionManager) {
+      this.sessionManager.completeSession(input.operationId);
+    }
 
     this.eventBus?.publish('FILE_CREATED', file);
     this.eventBus?.publish('UPLOAD_COMPLETED', { file, location, operation: completedOp });
@@ -315,6 +501,34 @@ export class TransferService {
       location,
       operation: completedOp,
     };
+  }
+
+  /**
+   * Uploads a file via direct placement (selecting the Drive with MAX_USABLE_FREE_SPACE).
+   */
+  async uploadFile(input: UploadFileInput): Promise<FileTransferResult> {
+    const initRes = await this.initResumableUpload({
+      name: input.name,
+      parentId: input.parentId,
+      mimeType: input.mimeType,
+      size: input.size,
+      conflictAction: input.conflictAction,
+    });
+
+    if (initRes.skipped && initRes.file && initRes.location && initRes.operation) {
+      return {
+        file: initRes.file,
+        location: initRes.location,
+        operation: initRes.operation,
+        skipped: true,
+      };
+    }
+
+    return this.resumeUploadStream({
+      operationId: initRes.operationId,
+      stream: input.stream,
+      startByte: 0,
+    });
   }
 
   /**

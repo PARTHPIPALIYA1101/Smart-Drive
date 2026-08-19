@@ -19,6 +19,7 @@ export class StorageOperationRepository {
       'PENDING',
       'RESERVED',
       'EXECUTING',
+      'WAITING_FOR_SOURCE',
       'VERIFYING',
       'SWITCHING',
       'RECOVERY_REQUIRED',

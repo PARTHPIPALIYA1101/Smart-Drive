@@ -19,6 +19,7 @@ export type OperationStatus =
   | 'PENDING'
   | 'RESERVED'
   | 'EXECUTING'
+  | 'WAITING_FOR_SOURCE'
   | 'VERIFYING'
   | 'SWITCHING'
   | 'COMPLETED'

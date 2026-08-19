@@ -195,9 +195,112 @@ function handleUploadQueueEvent(type, payload) {
 
 async function checkActiveOperations() {
   try {
+    // 1. Send reconnect heartbeat to clear backend grace timers
+    fetch('/api/operations/reconnect', { method: 'POST' }).catch(() => {});
+
+    // 2. Fetch active backend operations
     const res = await fetch('/api/operations/active');
     const json = await res.json();
-    if (json.success && json.data.activeBatches && json.data.activeBatches.length > 0) {
+    if (!json.success) return;
+
+    // Check active resumable sessions
+    const activeSessions = json.data.activeSessions || [];
+    const activeResumable = activeSessions.find(
+      (s) => s.status === 'EXECUTING' || s.status === 'WAITING_FOR_SOURCE' || s.status === 'RESERVED'
+    );
+
+    const savedUploadStr = sessionStorage.getItem('smartdrive_active_upload');
+    const savedUpload = savedUploadStr ? JSON.parse(savedUploadStr) : null;
+
+    if (activeResumable || savedUpload) {
+      const opId = activeResumable?.operationId || savedUpload?.operationId;
+      const fileName = activeResumable?.fileName || savedUpload?.fileName || 'Upload';
+      const fileSize = activeResumable?.fileSize || savedUpload?.fileSize || 0;
+
+      // Query latest offset from backend/Google Drive
+      let offset = activeResumable?.bytesCompleted || 0;
+      try {
+        const offsetRes = await fetch(`/api/transfer/resumable/${encodeURIComponent(opId)}/offset`);
+        const offsetJson = await offsetRes.json();
+        if (offsetJson.success) {
+          offset = offsetJson.data.offset || 0;
+        }
+      } catch {}
+
+      const toast = document.getElementById('uploadToast');
+      const toastTitle = document.getElementById('uploadToastTitle');
+      const toastPct = document.getElementById('uploadToastPct');
+      const toastBar = document.getElementById('uploadToastBar');
+      const toastMeta = document.getElementById('uploadToastMeta');
+      const toastSpeed = document.getElementById('uploadToastSpeed');
+      const cancelBtn = document.getElementById('cancelUploadBtn');
+      const resumeInput = document.getElementById('resumeFileInput');
+
+      if (toast) {
+        toast.style.display = 'flex';
+        toastTitle.textContent = `${fileName} (Paused)`;
+        const pct = fileSize > 0 ? Math.round((offset / fileSize) * 100) : 0;
+        toastPct.textContent = `${pct}%`;
+        toastBar.style.width = `${pct}%`;
+        toastMeta.textContent = `${formatBytes(offset)} / ${formatBytes(fileSize)}`;
+        toastSpeed.innerHTML = `⚠️ Click to re-select <strong>${fileName}</strong> and resume from ${formatBytes(offset)}`;
+        toast.style.cursor = 'pointer';
+
+        pendingResumeOperation = {
+          operationId: opId,
+          fileName,
+          fileSize,
+          offset,
+        };
+
+        toast.onclick = (e) => {
+          if (e.target === cancelBtn || cancelBtn?.contains(e.target)) return;
+          if (resumeInput) {
+            resumeInput.value = '';
+            resumeInput.click();
+          }
+        };
+
+        if (resumeInput) {
+          resumeInput.onchange = async (e) => {
+            const pickedFile = e.target.files?.[0];
+            if (!pickedFile) return;
+
+            if (
+              pendingResumeOperation &&
+              pickedFile.name === pendingResumeOperation.fileName &&
+              Math.abs(pickedFile.size - pendingResumeOperation.fileSize) < 1024
+            ) {
+              toast.style.cursor = 'default';
+              toast.onclick = null;
+              toastTitle.textContent = pickedFile.name;
+              await uploadSingleFile(pickedFile, pendingResumeOperation.operationId, pendingResumeOperation.offset);
+              pendingResumeOperation = null;
+            } else {
+              alert(
+                `Selected file "${pickedFile.name}" (${formatBytes(pickedFile.size)}) does not match expected file "${pendingResumeOperation?.fileName}" (${formatBytes(pendingResumeOperation?.fileSize || 0)}).`
+              );
+            }
+          };
+        }
+
+        if (cancelBtn) {
+          cancelBtn.style.display = 'inline-flex';
+          cancelBtn.onclick = async (e) => {
+            e.stopPropagation();
+            fetch(`/api/transfer/resumable/${encodeURIComponent(opId)}/cancel`, { method: 'POST' }).catch(() => {});
+            sessionStorage.removeItem('smartdrive_active_op_id');
+            sessionStorage.removeItem('smartdrive_active_upload');
+            toast.style.display = 'none';
+            pendingResumeOperation = null;
+          };
+        }
+      }
+      return;
+    }
+
+    // Check active batches
+    if (json.data.activeBatches && json.data.activeBatches.length > 0) {
       const active = json.data.activeBatches.find((b) => b.status === 'UPLOADING' || b.status === 'PENDING');
       if (active) {
         handleUploadQueueEvent('UPLOAD_PROGRESS', {
@@ -1082,6 +1185,9 @@ function closeContextMenu() {
 // ==========================================
 let isUploadCancelled = false;
 
+let currentResumableXHR = null;
+let pendingResumeOperation = null;
+
 async function handleFileInput(e) {
   const files = e.target.files;
   if (!files || files.length === 0) return;
@@ -1091,7 +1197,6 @@ async function handleFileInput(e) {
   }
   e.target.value = '';
   refreshAll();
-  autoSyncStorage();
 }
 
 async function handleFolderInput(e) {
@@ -1110,7 +1215,7 @@ async function handleFolderInput(e) {
   await uploadFolderBatch(items, rootFolderName, currentParentId);
 }
 
-async function uploadSingleFile(file) {
+async function uploadSingleFile(file, resumeOpId = null, startByte = 0) {
   const toast = document.getElementById('uploadToast');
   const toastTitle = document.getElementById('uploadToastTitle');
   const toastPct = document.getElementById('uploadToastPct');
@@ -1126,58 +1231,170 @@ async function uploadSingleFile(file) {
   activeClientUpload = { isBatch: false, name: file.name };
 
   toast.style.display = 'flex';
-  if (cancelBtn) cancelBtn.style.display = 'none';
-  toastTitle.textContent = file.name;
-  toastPct.textContent = '0%';
-  toastBar.style.width = '0%';
-  toastMeta.textContent = `0 B / ${formatBytes(file.size)}`;
-  toastSpeed.textContent = 'Streaming...';
-
-  const targetParentId = currentParentId;
-  const uploadUrl = targetParentId !== null && targetParentId !== undefined
-    ? `/api/transfer/upload?parentId=${encodeURIComponent(targetParentId)}`
-    : '/api/transfer/upload';
-
-  const formData = new FormData();
-  if (targetParentId !== null && targetParentId !== undefined) {
-    formData.append('parentId', targetParentId.toString());
+  if (cancelBtn) {
+    cancelBtn.style.display = 'inline-flex';
+    cancelBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (currentResumableXHR) {
+        currentResumableXHR.abort();
+      }
+      if (sessionStorage.getItem('smartdrive_active_op_id')) {
+        const opId = sessionStorage.getItem('smartdrive_active_op_id');
+        fetch(`/api/transfer/resumable/${encodeURIComponent(opId)}/cancel`, { method: 'POST' }).catch(() => {});
+        sessionStorage.removeItem('smartdrive_active_op_id');
+        sessionStorage.removeItem('smartdrive_active_upload');
+      }
+      toast.style.display = 'none';
+      activeClientUpload = null;
+    };
   }
-  formData.append('conflictAction', 'RENAME');
-  formData.append('file', file);
+
+  toastTitle.textContent = file.name;
+  const initialPct = file.size > 0 ? Math.round((startByte / file.size) * 100) : 0;
+  toastPct.textContent = `${initialPct}%`;
+  toastBar.style.width = `${initialPct}%`;
+  toastMeta.textContent = `${formatBytes(startByte)} / ${formatBytes(file.size)}`;
+  toastSpeed.textContent = startByte > 0 ? `Resuming from ${formatBytes(startByte)}...` : 'Connecting to Google Drive...';
 
   try {
-    const startTime = Date.now();
-    const progressInterval = setInterval(() => {
-      const elapsed = (Date.now() - startTime) / 1000;
-      const simPct = Math.min(90, Math.round((elapsed / 1.5) * 100));
-      toastPct.textContent = `${simPct}%`;
-      toastBar.style.width = `${simPct}%`;
-    }, 150);
+    let operationId = resumeOpId;
+    let initialOffset = startByte;
 
-    const res = await fetch(uploadUrl, {
-      method: 'POST',
-      body: formData,
-    });
-    clearInterval(progressInterval);
+    // 1. Initialize resumable session if not already initialized
+    if (!operationId) {
+      const initRes = await fetch('/api/transfer/resumable/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: file.name,
+          parentId: currentParentId,
+          mimeType: file.type || 'application/octet-stream',
+          size: file.size,
+          conflictAction: 'RENAME',
+        }),
+      });
 
-    const json = await res.json();
-    if (json.success) {
-      toastPct.textContent = '100%';
-      toastBar.style.width = '100%';
-      toastSpeed.textContent = '✓ Stored';
-      toastDismissTimeout = setTimeout(() => {
+      const initJson = await initRes.json();
+      if (!initJson.success) {
+        alert(`Upload failed: ${initJson.error?.message || 'Initialization failed'}`);
         toast.style.display = 'none';
-      }, 2000);
-      loadCurrentFolder();
-      loadTree();
-      loadCapacityReport();
-    } else {
-      alert(`Upload failed: ${json.error?.message || 'Error'}`);
-      toast.style.display = 'none';
+        activeClientUpload = null;
+        return;
+      }
+
+      if (initJson.data.skipped) {
+        toastPct.textContent = '100%';
+        toastBar.style.width = '100%';
+        toastSpeed.textContent = '✓ Already exists';
+        toastDismissTimeout = setTimeout(() => { toast.style.display = 'none'; }, 2000);
+        loadCurrentFolder();
+        activeClientUpload = null;
+        return;
+      }
+
+      operationId = initJson.data.operationId;
+      initialOffset = initJson.data.startByte || 0;
     }
+
+    // Persist active upload metadata to sessionStorage so refresh reconnects cleanly
+    sessionStorage.setItem('smartdrive_active_op_id', operationId);
+    sessionStorage.setItem(
+      'smartdrive_active_upload',
+      JSON.stringify({
+        operationId,
+        fileName: file.name,
+        fileSize: file.size,
+        parentId: currentParentId,
+        mimeType: file.type || 'application/octet-stream',
+      })
+    );
+
+    // 2. Query provider offset to ensure we stream from the exact byte position
+    if (initialOffset === 0 && resumeOpId) {
+      try {
+        const offsetRes = await fetch(`/api/transfer/resumable/${encodeURIComponent(operationId)}/offset`);
+        const offsetJson = await offsetRes.json();
+        if (offsetJson.success) {
+          initialOffset = offsetJson.data.offset || 0;
+        }
+      } catch {}
+    }
+
+    // 3. Stream slice from initialOffset to end
+    const slice = initialOffset > 0 ? file.slice(initialOffset) : file;
+
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      currentResumableXHR = xhr;
+      const streamUrl = `/api/transfer/resumable/${encodeURIComponent(operationId)}/stream?startByte=${initialOffset}`;
+
+      xhr.open('PUT', streamUrl, true);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+      let lastTime = Date.now();
+      let lastBytes = initialOffset;
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const currentTotal = initialOffset + e.loaded;
+          const pct = file.size > 0 ? Math.min(99, Math.round((currentTotal / file.size) * 100)) : 0;
+          toastPct.textContent = `${pct}%`;
+          toastBar.style.width = `${pct}%`;
+          toastMeta.textContent = `${formatBytes(currentTotal)} / ${formatBytes(file.size)}`;
+
+          const now = Date.now();
+          const timeDiff = (now - lastTime) / 1000;
+          if (timeDiff >= 0.5) {
+            const bytesDiff = currentTotal - lastBytes;
+            const speed = bytesDiff / timeDiff;
+            toastSpeed.textContent = `${formatBytes(speed)}/s`;
+            lastTime = now;
+            lastBytes = currentTotal;
+          }
+        }
+      };
+
+      xhr.onload = () => {
+        currentResumableXHR = null;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(xhr.response);
+        } else {
+          reject(new Error(`Upload failed with status ${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+
+      xhr.onerror = () => {
+        currentResumableXHR = null;
+        reject(new Error('Network error during upload stream'));
+      };
+
+      xhr.onabort = () => {
+        currentResumableXHR = null;
+        reject(new Error('Upload aborted'));
+      };
+
+      xhr.send(slice);
+    });
+
+    // Upload succeeded
+    sessionStorage.removeItem('smartdrive_active_op_id');
+    sessionStorage.removeItem('smartdrive_active_upload');
+    toastPct.textContent = '100%';
+    toastBar.style.width = '100%';
+    toastSpeed.textContent = '✓ Stored';
+    toastDismissTimeout = setTimeout(() => {
+      toast.style.display = 'none';
+      if (cancelBtn) cancelBtn.style.display = 'none';
+    }, 2000);
+    loadCurrentFolder();
+    loadTree();
+    loadCapacityReport();
   } catch (err) {
-    alert(`Failed to upload ${file.name}`);
-    toast.style.display = 'none';
+    if (err.message === 'Upload aborted') {
+      return;
+    }
+    console.error('Upload stream error:', err);
+    toastSpeed.textContent = 'Interrupted';
   } finally {
     activeClientUpload = null;
   }
@@ -2267,20 +2484,30 @@ async function loadTrashView() {
 
 function setupSearchAndShortcuts() {
   const searchInput = document.getElementById('searchInput');
+  let searchDebounceTimer = null;
+  let searchAbortController = null;
 
   searchInput.addEventListener('input', (e) => {
     const q = e.target.value.trim();
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+    if (searchAbortController) searchAbortController.abort();
+
     if (!q) {
       loadCurrentFolder();
       return;
     }
 
-    fetch(`/api/search?query=${encodeURIComponent(q)}`)
-      .then((r) => r.json())
-      .then((json) => {
-        if (json.success) renderItems(json.data);
-      })
-      .catch((err) => console.error('Search error:', err));
+    searchDebounceTimer = setTimeout(() => {
+      searchAbortController = new AbortController();
+      fetch(`/api/search?query=${encodeURIComponent(q)}`, { signal: searchAbortController.signal })
+        .then((r) => r.json())
+        .then((json) => {
+          if (json.success) renderItems(json.data);
+        })
+        .catch((err) => {
+          if (err.name !== 'AbortError') console.error('Search error:', err);
+        });
+    }, 300);
   });
 
   window.addEventListener('keydown', (e) => {

@@ -5,6 +5,8 @@ import { CapacityService } from '../../domain/capacity/capacity.service.js';
 import { DriveCapacitySnapshot, UnifiedCapacityReport } from '../../domain/capacity/capacity.types.js';
 import { EntityNotFoundError } from '../../domain/errors.js';
 
+import { ResourceLimits } from '../../config/resource-limits.js';
+
 export class DriveSyncService {
   constructor(
     private accountRepo: GoogleAccountRepository,
@@ -14,12 +16,17 @@ export class DriveSyncService {
   ) {}
 
   /**
-   * Synchronizes quota information for a single Google Drive account.
+   * Synchronizes quota information for a single Google Drive account with caching.
    */
-  async syncAccountQuota(accountId: number): Promise<DriveCapacitySnapshot> {
+  async syncAccountQuota(accountId: number, force = false): Promise<DriveCapacitySnapshot> {
     const account = this.accountRepo.findById(accountId);
     if (!account) {
       throw new EntityNotFoundError('Google Account', accountId);
+    }
+
+    const now = Date.now();
+    if (!force && account.lastSyncedAt && now - account.lastSyncedAt < ResourceLimits.QUOTA_REFRESH_INTERVAL) {
+      return this.capacityService.getDriveCapacitySnapshot(accountId);
     }
 
     try {
@@ -39,14 +46,14 @@ export class DriveSyncService {
   /**
    * Synchronizes quota across all registered accounts with failure isolation.
    */
-  async syncAllAccounts(): Promise<UnifiedCapacityReport> {
+  async syncAllAccounts(force = false): Promise<UnifiedCapacityReport> {
     const accounts = this.accountRepo.listAll();
 
     // Execute sync across all accounts concurrently
     await Promise.allSettled(
       accounts.map(async (acc) => {
         try {
-          await this.syncAccountQuota(acc.id);
+          await this.syncAccountQuota(acc.id, force);
         } catch {
           // Failure handled inside syncAccountQuota via accountService.recordFailure
         }

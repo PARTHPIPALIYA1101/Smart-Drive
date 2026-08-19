@@ -26,6 +26,36 @@ export interface FileTransferResult {
   skipped?: boolean;
 }
 
+export interface InitResumableUploadInput {
+  name: string;
+  parentId: number | null;
+  mimeType: string;
+  size: number;
+  conflictAction?: UploadConflictAction;
+  relativePath?: string;
+  batchId?: string;
+}
+
+export interface InitResumableUploadResult {
+  operationId: string;
+  destDriveId: number;
+  resumableSessionUri?: string;
+  startByte: number;
+  skipped?: boolean;
+  file?: SmartFile;
+  location?: FileLocation;
+  operation?: StorageOperation;
+}
+
+export interface ResumeUploadStreamInput {
+  operationId: string;
+  stream: Readable;
+  startByte: number;
+  abortSignal?: AbortSignal;
+  onProgress?: (bytesUploaded: number) => void;
+  isPartial?: boolean;
+}
+
 export interface CopyFileInput {
   fileId: number;
   targetParentId: number | null;

@@ -29,6 +29,7 @@ import { AccountService } from './application/account/account.service.js';
 import { ReservationManager, ReservationReaper } from './storage/reservation/index.js';
 import { DomainEventBus } from './domain/events/event-bus.js';
 import { UploadQueue } from './domain/transfer/upload-queue.js';
+import { TransferSessionManager } from './domain/transfer/transfer-session-manager.js';
 import { createServer, AppServices } from './api/server.js';
 
 export async function bootstrap() {
@@ -60,6 +61,13 @@ export async function bootstrap() {
 
   const providerFactory = new StorageProviderFactory(oauthService);
 
+  const sessionManager = new TransferSessionManager(
+    opRepo,
+    resRepo,
+    providerFactory,
+    eventBus
+  );
+
   const accountService = new AccountService(accountRepo, oauthService, encryptor, eventBus);
   const driveSyncService = new DriveSyncService(
     accountRepo,
@@ -82,9 +90,10 @@ export async function bootstrap() {
     resRepo,
     capacityService,
     providerFactory,
-    eventBus
+    eventBus,
+    sessionManager
   );
-  const uploadQueue = new UploadQueue(transferService, opRepo, eventBus, vfsService, 3);
+  const uploadQueue = new UploadQueue(transferService, opRepo, eventBus, vfsService);
   const storagePlanner = new StoragePlanner(capacityService, fileRepo, locationRepo, opRepo);
   const migrationPlanner = new MigrationPlanner(
     capacityService,
@@ -157,6 +166,7 @@ export async function bootstrap() {
     retirementService,
     operationRepo: opRepo,
     eventBus,
+    sessionManager,
   };
 
   const server = createServer(services);

@@ -21,6 +21,8 @@ import { SearchService } from '../../src/search/search.service.js';
 import { TransferProgressTracker } from '../../src/domain/transfer/progress-tracker.js';
 import { DriveRetirementService } from '../../src/application/retirement/retirement.service.js';
 import { StorageProviderFactory } from '../../src/providers/provider-factory.js';
+import { TransferSessionManager } from '../../src/domain/transfer/transfer-session-manager.js';
+import { InMemoryStorageProvider } from '../../src/providers/memory/in-memory-storage.provider.js';
 import { TokenEncryptor } from '../../src/infrastructure/crypto/token-encryptor.js';
 import { GoogleOAuthService } from '../../src/providers/google-drive/auth/google-oauth.service.js';
 import { AccountService } from '../../src/application/account/account.service.js';
@@ -54,6 +56,24 @@ describe('Fastify REST API Suite', () => {
       accountRepo
     );
     const accountService = new AccountService(accountRepo, oauthService, encryptor);
+    const now = Date.now();
+    const drive = accountRepo.insert({
+      email: 'api_drive@smartdrive.io',
+      displayName: 'API Test Drive',
+      totalSpace: 100000,
+      usedSpace: 0,
+      freeSpace: 100000,
+      reservedBytes: 0,
+      migrationLocked: false,
+      status: 'AVAILABLE',
+      encryptedCredentials: 'enc',
+      createdAt: now,
+      updatedAt: now,
+    });
+    providerFactory.registerMockProvider(drive.id, new InMemoryStorageProvider(100000));
+
+    const sessionManager = new TransferSessionManager(opRepo, resRepo, providerFactory);
+
     const driveSyncService = new DriveSyncService(
       accountRepo,
       providerFactory,
@@ -67,7 +87,9 @@ describe('Fastify REST API Suite', () => {
       opRepo,
       resRepo,
       capacityService,
-      providerFactory
+      providerFactory,
+      undefined,
+      sessionManager
     );
     const storagePlanner = new StoragePlanner(capacityService, fileRepo, locationRepo, opRepo);
     const migrationPlanner = new MigrationPlanner(
@@ -128,6 +150,7 @@ describe('Fastify REST API Suite', () => {
       progressTracker,
       retirementService,
       operationRepo: opRepo,
+      sessionManager,
     };
 
     app = createServer(services);
@@ -335,5 +358,66 @@ describe('Fastify REST API Suite', () => {
     const docChildren = JSON.parse(docChildrenRes.body).data;
     expect(docChildren).toHaveLength(1);
     expect(docChildren[0].id).toBe(invFolder.id);
+  });
+
+  it('Resumable endpoints lifecycle: init -> offset -> reconnect -> active -> cancel', async () => {
+    // 1. Init resumable session
+    const initRes = await app.inject({
+      method: 'POST',
+      url: '/api/transfer/resumable/init',
+      payload: {
+        name: 'api_upload.dat',
+        parentId: null,
+        size: 5000,
+        mimeType: 'application/octet-stream',
+      },
+    });
+
+    expect(initRes.statusCode).toBe(201);
+    const initJson = JSON.parse(initRes.body);
+    expect(initJson.success).toBe(true);
+    const opId = initJson.data.operationId;
+    expect(opId).toBeDefined();
+
+    // 2. Query offset
+    const offsetRes = await app.inject({
+      method: 'GET',
+      url: `/api/transfer/resumable/${opId}/offset`,
+    });
+    expect(offsetRes.statusCode).toBe(200);
+    const offsetJson = JSON.parse(offsetRes.body);
+    expect(offsetJson.success).toBe(true);
+    expect(offsetJson.data.operationId).toBe(opId);
+    expect(offsetJson.data.offset).toBe(0);
+
+    // 3. Reconnect ping
+    const reconnectRes = await app.inject({
+      method: 'POST',
+      url: `/api/operations/${opId}/reconnect`,
+    });
+    expect(reconnectRes.statusCode).toBe(200);
+
+    const globalReconnectRes = await app.inject({
+      method: 'POST',
+      url: '/api/operations/reconnect',
+    });
+    expect(globalReconnectRes.statusCode).toBe(200);
+
+    // 4. Active operations
+    const activeRes = await app.inject({
+      method: 'GET',
+      url: '/api/operations/active',
+    });
+    expect(activeRes.statusCode).toBe(200);
+    const activeJson = JSON.parse(activeRes.body);
+    expect(activeJson.success).toBe(true);
+    expect(activeJson.data.activeSessions.some((s: any) => s.operationId === opId)).toBe(true);
+
+    // 5. Cancel upload
+    const cancelRes = await app.inject({
+      method: 'POST',
+      url: `/api/transfer/resumable/${opId}/cancel`,
+    });
+    expect(cancelRes.statusCode).toBe(200);
   });
 });
