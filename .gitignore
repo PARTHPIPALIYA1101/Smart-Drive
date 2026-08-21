@@ -75,3 +75,5 @@ yarn-error.log*
 # ============================
 *.tgz
 *.tsbuildinfo
+learn.txt
+flow.txt

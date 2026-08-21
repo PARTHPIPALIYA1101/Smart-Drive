@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { FileRepository } from '../../persistence/repositories/file.repository.js';
 import { FileLocationRepository } from '../../persistence/repositories/file-location.repository.js';
 import { GoogleAccountRepository } from '../../persistence/repositories/google-account.repository.js';
@@ -235,6 +237,9 @@ export class TransferService {
         policy: 'MAX_USABLE_FREE_SPACE',
         selectedDriveId: selectedDrive.accountId,
         usableBefore: selectedDrive.usableSpace,
+        sourceType: input.sourceType || 'FILE',
+        sourcePath: input.sourcePath,
+        rootSmartFileId: input.rootSmartFileId,
         fileName: validName,
         relativePath: input.relativePath || validName,
         parentId: normParentId,
@@ -280,6 +285,9 @@ export class TransferService {
         policy: 'MAX_USABLE_FREE_SPACE',
         selectedDriveId: selectedDrive.accountId,
         usableBefore: selectedDrive.usableSpace,
+        sourceType: input.sourceType || 'FILE',
+        sourcePath: input.sourcePath,
+        rootSmartFileId: input.rootSmartFileId,
         fileName: validName,
         relativePath: input.relativePath || validName,
         parentId: normParentId,
@@ -304,6 +312,9 @@ export class TransferService {
         resumableSessionUri: sessionUri,
         batchId: input.batchId,
         conflictAction: input.conflictAction,
+        sourceType: input.sourceType || 'FILE',
+        sourcePath: input.sourcePath,
+        rootSmartFileId: input.rootSmartFileId,
       });
     }
 
@@ -358,6 +369,23 @@ export class TransferService {
     const mimeType = planData.mimeType || 'application/octet-stream';
     const totalBytes = op.requestedBytes || planData.fileSize || 0;
     const normParentId = planData.parentId !== undefined ? planData.parentId : null;
+    const itemSourcePath = input.sourcePath || planData.sourcePath;
+
+    let stream = input.stream;
+    if (!stream && itemSourcePath) {
+      if (fs.existsSync(itemSourcePath)) {
+        stream = fs.createReadStream(itemSourcePath, { start: input.startByte });
+      } else {
+        if (this.sessionManager) {
+          this.sessionManager.markWaitingForSource(input.operationId);
+        }
+        throw new Error(`Source file unavailable at ${itemSourcePath}`);
+      }
+    }
+
+    if (!stream) {
+      throw new Error(`No data stream or source path available for upload ${input.operationId}`);
+    }
 
     if (this.sessionManager) {
       this.sessionManager.handleReconnect(input.operationId);
@@ -366,7 +394,7 @@ export class TransferService {
     let providerMetadata: any;
     try {
       if (sessionUri && provider.uploadStreamToSession) {
-        providerMetadata = await provider.uploadStreamToSession(sessionUri, input.stream, {
+        providerMetadata = await provider.uploadStreamToSession(sessionUri, stream, {
           startByte: input.startByte,
           totalBytes,
           mimeType,
@@ -390,7 +418,7 @@ export class TransferService {
           },
         });
       } else {
-        providerMetadata = await provider.uploadStream(input.stream, {
+        providerMetadata = await provider.uploadStream(stream, {
           filename,
           mimeType,
           size: totalBytes,

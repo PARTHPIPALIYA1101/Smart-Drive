@@ -16,6 +16,9 @@ export interface ActiveUploadSession {
   bytesCompleted: number;
   resumableSessionUri?: string;
   smartFileId?: number;
+  rootSmartFileId?: number | null;
+  sourceType?: 'FILE' | 'FOLDER';
+  sourcePath?: string;
   status: OperationStatus;
   abortController: AbortController;
   disconnectTimer?: NodeJS.Timeout;
@@ -50,6 +53,9 @@ export class TransferSessionManager {
     mimeType: string;
     resumableSessionUri?: string;
     smartFileId?: number;
+    rootSmartFileId?: number | null;
+    sourceType?: 'FILE' | 'FOLDER';
+    sourcePath?: string;
     batchId?: string;
     conflictAction?: string;
     bytesCompleted?: number;
@@ -58,6 +64,9 @@ export class TransferSessionManager {
     if (existing) {
       if (data.resumableSessionUri) existing.resumableSessionUri = data.resumableSessionUri;
       if (data.smartFileId) existing.smartFileId = data.smartFileId;
+      if (data.rootSmartFileId !== undefined) existing.rootSmartFileId = data.rootSmartFileId;
+      if (data.sourcePath) existing.sourcePath = data.sourcePath;
+      if (data.sourceType) existing.sourceType = data.sourceType;
       existing.lastActiveAt = Date.now();
       existing.isConnected = true;
       if (existing.disconnectTimer) {
@@ -78,6 +87,9 @@ export class TransferSessionManager {
       bytesCompleted: data.bytesCompleted || 0,
       resumableSessionUri: data.resumableSessionUri,
       smartFileId: data.smartFileId,
+      rootSmartFileId: data.rootSmartFileId,
+      sourceType: data.sourceType,
+      sourcePath: data.sourcePath,
       status: 'EXECUTING',
       abortController: new AbortController(),
       lastActiveAt: Date.now(),
@@ -294,9 +306,12 @@ export class TransferSessionManager {
       this.operationRepo.updatePlanContext(
         session.operationId,
         JSON.stringify({
+          sourceType: session.sourceType,
+          sourcePath: session.sourcePath,
           fileName: session.fileName,
           relativePath: session.relativePath,
           parentId: session.parentId,
+          rootSmartFileId: session.rootSmartFileId,
           fileSize: session.fileSize,
           mimeType: session.mimeType,
           bytesCompleted: session.bytesCompleted,
@@ -310,5 +325,18 @@ export class TransferSessionManager {
     } catch {
       // Non-blocking planContext update
     }
+  }
+
+  cleanup(): void {
+    for (const session of this.sessions.values()) {
+      if (session.disconnectTimer) {
+        clearTimeout(session.disconnectTimer);
+      }
+    }
+    this.sessions.clear();
+  }
+
+  destroy(): void {
+    this.cleanup();
   }
 }

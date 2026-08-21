@@ -143,7 +143,59 @@ export async function bootstrap() {
     console.log(`[SmartDrive] Reconciled ${recoveryReport.recoveredCount} incomplete operations on startup.`);
   }
 
-  // 2. Start Reservation Reaper
+  // 2. Restore active upload batches and resumable sessions
+  const incompleteOps = opRepo.findIncompleteOperations();
+  for (const op of incompleteOps) {
+    if (op.operationType === 'UPLOAD') {
+      let planData: any = {};
+      try {
+        planData = op.planContext ? JSON.parse(op.planContext) : {};
+      } catch {}
+
+      if (planData.items && Array.isArray(planData.items)) {
+        uploadQueue.getBatch(op.id);
+      } else if (planData.sourcePath && (op.status === 'EXECUTING' || op.status === 'WAITING_FOR_SOURCE')) {
+        const sourcePath = planData.sourcePath;
+        const exists = sourcePath && (await import('node:fs')).existsSync(sourcePath);
+        if (exists) {
+          sessionManager.registerSession({
+            operationId: op.id,
+            destDriveId: op.destDriveId || planData.destDriveId,
+            fileName: planData.fileName || 'Untitled',
+            relativePath: planData.relativePath || planData.fileName,
+            parentId: planData.parentId,
+            rootSmartFileId: planData.rootSmartFileId,
+            fileSize: op.requestedBytes || planData.fileSize || 0,
+            mimeType: planData.mimeType || 'application/octet-stream',
+            resumableSessionUri: planData.resumableSessionUri,
+            sourceType: 'FILE',
+            sourcePath,
+            bytesCompleted: planData.bytesCompleted || 0,
+          });
+
+          // Query provider offset and resume in background if sessionUri exists
+          if (planData.resumableSessionUri && op.destDriveId) {
+            try {
+              const prov = providerFactory.getProvider(op.destDriveId);
+              if (prov.queryResumableOffset) {
+                prov.queryResumableOffset(planData.resumableSessionUri, op.requestedBytes || planData.fileSize || 0).then((offset) => {
+                  transferService.resumeUploadStream({
+                    operationId: op.id,
+                    startByte: offset,
+                    sourcePath,
+                  }).catch(() => {});
+                }).catch(() => {});
+              }
+            } catch {}
+          }
+        } else {
+          sessionManager.markWaitingForSource(op.id);
+        }
+      }
+    }
+  }
+
+  // 3. Start Reservation Reaper
   const reaper = new ReservationReaper(reservationManager, 60000);
   reaper.start();
 

@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { VirtualFilesystemService } from '../domain/vfs/vfs.service.js';
 import { AccountService } from '../application/account/account.service.js';
@@ -503,6 +504,235 @@ export function createServer(services: AppServices): FastifyInstance {
     return reply.status(202).send({ success: true, data: batch });
   });
 
+  app.post('/api/transfer/local/file/start', async (req, reply) => {
+    const body = req.body as {
+      sourcePath: string;
+      name?: string;
+      parentId?: number | null;
+      mimeType?: string;
+      conflictAction?: any;
+    };
+
+    if (!body.sourcePath || !fs.existsSync(body.sourcePath)) {
+      return reply.status(400).send({ success: false, error: { message: `File not found at source path: ${body.sourcePath}` } });
+    }
+
+    const stats = fs.statSync(body.sourcePath);
+    if (stats.isDirectory()) {
+      return reply.status(400).send({ success: false, error: { message: 'Source path is a directory, not a file' } });
+    }
+
+    const filename = body.name || path.basename(body.sourcePath);
+    const parentId = normalizeParentId(body.parentId);
+    const size = stats.size;
+    const mimeType = body.mimeType || 'application/octet-stream';
+
+    const initRes = await services.transferService.initResumableUpload({
+      name: filename,
+      parentId,
+      mimeType,
+      size,
+      conflictAction: body.conflictAction || 'RENAME',
+      sourceType: 'FILE',
+      sourcePath: body.sourcePath,
+    });
+
+    if (initRes.skipped) {
+      return reply.send({ success: true, data: initRes });
+    }
+
+    // Start background bounded stream directly from local file
+    services.transferService.resumeUploadStream({
+      operationId: initRes.operationId,
+      startByte: 0,
+      sourcePath: body.sourcePath,
+    }).catch((err) => {
+      console.error(`Background upload error for ${initRes.operationId}:`, err);
+    });
+
+    return reply.status(202).send({ success: true, data: initRes });
+  });
+
+  app.post('/api/transfer/local/folder/start', async (req, reply) => {
+    const body = req.body as {
+      sourcePath: string;
+      rootFolderName?: string;
+      parentId?: number | null;
+      conflictAction?: any;
+      items?: Array<{ filename: string; relativePath: string; size: number; mimeType?: string }>;
+    };
+
+    if (!body.sourcePath || !fs.existsSync(body.sourcePath)) {
+      return reply.status(400).send({ success: false, error: { message: `Folder not found at source path: ${body.sourcePath}` } });
+    }
+
+    const stats = fs.statSync(body.sourcePath);
+    if (!stats.isDirectory()) {
+      return reply.status(400).send({ success: false, error: { message: 'Source path is a file, not a directory' } });
+    }
+
+    const rootFolderName = body.rootFolderName || path.basename(body.sourcePath) || 'Uploaded Folder';
+    const parentId = normalizeParentId(body.parentId);
+
+    function scanLocalDir(dir: string, baseDir = ''): Array<{ filename: string; relativePath: string; size: number; mimeType: string }> {
+      const results: Array<{ filename: string; relativePath: string; size: number; mimeType: string }> = [];
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        const rel = baseDir ? `${baseDir}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          results.push(...scanLocalDir(full, rel));
+        } else if (entry.isFile()) {
+          const s = fs.statSync(full);
+          results.push({
+            filename: entry.name,
+            relativePath: rel,
+            size: s.size,
+            mimeType: 'application/octet-stream',
+          });
+        }
+      }
+      return results;
+    }
+
+    const items = Array.isArray(body.items) && body.items.length > 0
+      ? body.items.map((i) => ({
+          filename: i.filename || path.basename(i.relativePath),
+          relativePath: i.relativePath,
+          size: i.size,
+          mimeType: i.mimeType || 'application/octet-stream',
+        }))
+      : scanLocalDir(body.sourcePath);
+
+    // Plan multi-drive placement
+    const plan = services.transferService.planFolderUpload({
+      rootFolderName,
+      parentId,
+      files: items.map((i) => ({
+        relativePath: i.relativePath,
+        size: i.size,
+        mimeType: i.mimeType,
+      })),
+    });
+
+    if (!services.uploadQueue) {
+      return reply.status(500).send({ success: false, error: { message: 'Upload queue not configured' } });
+    }
+
+    const batch = services.uploadQueue.enqueueBatch({
+      sourceType: 'FOLDER',
+      sourcePath: body.sourcePath,
+      rootFolderName,
+      parentId,
+      items: items.map((i) => ({
+        filename: i.filename,
+        relativePath: i.relativePath,
+        size: i.size,
+        mimeType: i.mimeType,
+        sourcePath: path.join(body.sourcePath, i.relativePath),
+        conflictAction: body.conflictAction || 'SKIP',
+      })),
+    });
+
+    return reply.status(202).send({ success: true, data: { batch, plan } });
+  });
+
+  app.post('/api/transfer/operations/:id/resume-source', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { newSourcePath: string };
+
+    if (!body.newSourcePath || !fs.existsSync(body.newSourcePath)) {
+      return reply.status(400).send({ success: false, error: { message: `Path does not exist: ${body.newSourcePath}` } });
+    }
+
+    // 1. Check if it's a batch
+    if (services.uploadQueue) {
+      const batch = services.uploadQueue.getBatch(id);
+      if (batch) {
+        const verifyRes = services.uploadQueue.verifySourceFolder(id, body.newSourcePath);
+        if (!verifyRes.valid) {
+          return reply.status(400).send({
+            success: false,
+            error: { message: verifyRes.error, missingFiles: verifyRes.missingFiles },
+          });
+        }
+        await services.uploadQueue.resumeBatch(id, body.newSourcePath);
+        return reply.send({ success: true, data: { batchId: id, resumed: true } });
+      }
+    }
+
+    // 2. Check if it's a single file operation
+    const op = services.operationRepo.findById(id);
+    if (!op) {
+      return reply.status(404).send({ success: false, error: { message: 'Operation not found' } });
+    }
+
+    let planData: any = {};
+    try {
+      planData = op.planContext ? JSON.parse(op.planContext) : {};
+    } catch {}
+
+    const stats = fs.statSync(body.newSourcePath);
+    if (stats.size !== (op.requestedBytes || planData.fileSize)) {
+      return reply.status(400).send({
+        success: false,
+        error: { message: `File size (${stats.size}) does not match expected size (${op.requestedBytes || planData.fileSize})` },
+      });
+    }
+
+    // Query provider offset
+    let offset = planData.bytesCompleted || 0;
+    const destDriveId = op.destDriveId || planData.destDriveId;
+    const sessionUri = planData.resumableSessionUri;
+    const totalBytes = op.requestedBytes || planData.fileSize || 0;
+
+    if (destDriveId && sessionUri && (services.transferService as any).providerFactory) {
+      try {
+        const provider = (services.transferService as any).providerFactory.getProvider(destDriveId);
+        if (provider.queryResumableOffset) {
+          offset = await provider.queryResumableOffset(sessionUri, totalBytes);
+        }
+      } catch {}
+    }
+
+    services.operationRepo.updateStatus(id, 'EXECUTING');
+    services.operationRepo.updatePlanContext(
+      id,
+      JSON.stringify({
+        ...planData,
+        sourcePath: body.newSourcePath,
+        bytesCompleted: offset,
+      })
+    );
+
+    if (services.sessionManager) {
+      services.sessionManager.registerSession({
+        operationId: id,
+        destDriveId: destDriveId,
+        fileName: planData.fileName || 'Untitled',
+        relativePath: planData.relativePath || planData.fileName,
+        parentId: planData.parentId,
+        fileSize: totalBytes,
+        mimeType: planData.mimeType || 'application/octet-stream',
+        resumableSessionUri: sessionUri,
+        sourceType: 'FILE',
+        sourcePath: body.newSourcePath,
+        bytesCompleted: offset,
+      });
+    }
+
+    // Resume background streaming
+    services.transferService.resumeUploadStream({
+      operationId: id,
+      startByte: offset,
+      sourcePath: body.newSourcePath,
+    }).catch((err) => {
+      console.error(`Background resume error for ${id}:`, err);
+    });
+
+    return reply.send({ success: true, data: { operationId: id, offset, resumed: true } });
+  });
+
   app.get('/api/operations/active', async (req, reply) => {
     const activeBatches = services.uploadQueue ? services.uploadQueue.getActiveBatches() : [];
     const activeOps = services.operationRepo.findIncompleteOperations();
@@ -521,6 +751,9 @@ export function createServer(services: AppServices): FastifyInstance {
           status: s.status,
           destDriveId: s.destDriveId,
           parentId: s.parentId,
+          rootSmartFileId: s.rootSmartFileId,
+          sourceType: s.sourceType,
+          sourcePath: s.sourcePath,
           resumableSessionUri: s.resumableSessionUri,
           batchId: s.batchId,
         })),

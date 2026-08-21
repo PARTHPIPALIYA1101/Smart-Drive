@@ -34,6 +34,9 @@ export interface InitResumableUploadInput {
   conflictAction?: UploadConflictAction;
   relativePath?: string;
   batchId?: string;
+  sourceType?: 'FILE' | 'FOLDER';
+  sourcePath?: string;
+  rootSmartFileId?: number | null;
 }
 
 export interface InitResumableUploadResult {
@@ -49,11 +52,12 @@ export interface InitResumableUploadResult {
 
 export interface ResumeUploadStreamInput {
   operationId: string;
-  stream: Readable;
+  stream?: Readable;
   startByte: number;
   abortSignal?: AbortSignal;
   onProgress?: (bytesUploaded: number) => void;
   isPartial?: boolean;
+  sourcePath?: string;
 }
 
 export interface CopyFileInput {
@@ -92,3 +96,26 @@ export interface FolderUploadPlanResult {
   largestFileSize: number;
   placements: FolderFilePlacement[];
 }
+
+export interface LocalFolderUploadInput {
+  sourcePath: string;
+  rootFolderName?: string;
+  parentId?: number | null;
+  conflictAction?: UploadConflictAction;
+}
+
+export interface LocalFileUploadInput {
+  sourcePath: string;
+  name?: string;
+  parentId?: number | null;
+  mimeType?: string;
+  conflictAction?: UploadConflictAction;
+}
+
+export interface ResumeSourceVerificationResult {
+  valid: boolean;
+  error?: string;
+  matchedFiles: number;
+  missingFiles: string[];
+}
+

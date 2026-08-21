@@ -287,6 +287,7 @@
 
     <!-- Floating Bottom-Right Upload Toast -->
     <input type="file" id="resumeFileInput" style="display: none;">
+    <input type="file" id="resumeFolderInput" webkitdirectory directory multiple style="display: none;">
     <div class="upload-activity-toast" id="uploadToast" style="display: none;">
       <div class="upload-toast-header">
         <span class="upload-toast-title" id="uploadToastTitle">Uploading file...</span>
@@ -303,6 +304,9 @@
       <div class="upload-toast-footer">
         <span class="upload-toast-meta" id="uploadToastMeta">0 B / 0 B</span>
         <span class="upload-toast-speed" id="uploadToastSpeed">Calculating...</span>
+      </div>
+      <div id="uploadToastActionContainer" style="display: none; padding-top: 6px;">
+        <button class="btn btn-primary btn-xs" id="uploadResumeActionBtn" style="width: 100%;">Select Folder to Resume</button>
       </div>
     </div>
 

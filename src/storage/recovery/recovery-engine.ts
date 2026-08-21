@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import { StorageOperationRepository } from '../../persistence/repositories/storage-operation.repository.js';
 import { StorageReservationRepository } from '../../persistence/repositories/storage-reservation.repository.js';
 import { FileLocationRepository } from '../../persistence/repositories/file-location.repository.js';
@@ -36,9 +37,41 @@ export class CrashRecoveryEngine {
   }
 
   private async recoverOperation(op: StorageOperation): Promise<OperationRecoveryResult> {
+    // 1. Check if this is an UPLOAD operation with a local source path
+    if (op.operationType === 'UPLOAD') {
+      let planData: any = {};
+      try {
+        planData = op.planContext ? JSON.parse(op.planContext) : {};
+      } catch {}
+
+      const sourcePath = planData.sourcePath;
+      if (sourcePath) {
+        if (fs.existsSync(sourcePath)) {
+          // Source exists on disk: preserve operation and reservations for automatic resumption
+          return {
+            operationId: op.id,
+            operationType: op.operationType,
+            previousStatus: op.status,
+            resolution: 'FINALIZED',
+            details: `Recovered local source at "${sourcePath}" for upload resumption`,
+          };
+        } else {
+          // Source missing on disk: transition to WAITING_FOR_SOURCE
+          this.operationRepo.updateStatus(op.id, 'WAITING_FOR_SOURCE');
+          return {
+            operationId: op.id,
+            operationType: op.operationType,
+            previousStatus: op.status,
+            resolution: 'ROLLED_BACK',
+            details: `Source path "${sourcePath}" unavailable, marked WAITING_FOR_SOURCE`,
+          };
+        }
+      }
+    }
+
     switch (op.status) {
       case 'RESERVED': {
-        // No bytes transferred; release reservations and cancel
+        // No bytes transferred and no recoverable local source; release reservations and cancel
         this.reservationRepo.releaseByOperationId(op.id);
         this.operationRepo.updateStatus(op.id, 'CANCELLED', 'CRASH_RECOVERY', 'Cancelled in RESERVED state on restart');
         return {
@@ -51,7 +84,7 @@ export class CrashRecoveryEngine {
       }
 
       case 'EXECUTING': {
-        // Transfer was interrupted in flight; inspect destination provider and rollback
+        // Transfer was interrupted in flight without recoverable local source; inspect destination provider and rollback
         if (op.destDriveId && op.fileId) {
           const copyingLocs = this.locationRepo
             .findAllByFileId(op.fileId)

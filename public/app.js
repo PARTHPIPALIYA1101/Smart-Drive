@@ -145,16 +145,13 @@ function handleUploadQueueEvent(type, payload) {
   const toastMeta = document.getElementById('uploadToastMeta');
   const toastSpeed = document.getElementById('uploadToastSpeed');
   const cancelBtn = document.getElementById('cancelUploadBtn');
+  const actionContainer = document.getElementById('uploadToastActionContainer');
+  const actionBtn = document.getElementById('uploadResumeActionBtn');
 
   if (!toast) return;
 
   // If a client upload is actively controlling the toast, ignore backend single-file completion events
-  if (activeClientUpload) {
-    return;
-  }
-
-  // Only handle real batch queue events from backend UploadQueue
-  if (!payload || (!payload.batchId && payload.totalFiles === undefined)) {
+  if (activeClientUpload && !payload.batchId) {
     return;
   }
 
@@ -163,16 +160,46 @@ function handleUploadQueueEvent(type, payload) {
     toastDismissTimeout = null;
   }
 
-  if (type === 'UPLOAD_QUEUED' || type === 'UPLOAD_PROGRESS') {
+  if (payload?.status === 'WAITING_FOR_SOURCE') {
     toast.style.display = 'flex';
     if (cancelBtn) cancelBtn.style.display = 'inline-flex';
+    toastTitle.textContent = `${payload.rootFolderName || 'Upload'} (Paused)`;
+    toastSpeed.textContent = payload.sourceType === 'FILE' ? '⚠️ Source file unavailable' : '⚠️ Source folder unavailable';
+    if (actionContainer && actionBtn) {
+      actionContainer.style.display = 'block';
+      actionBtn.textContent = payload.sourceType === 'FILE' ? 'Select File to Resume' : 'Select Folder to Resume';
+      actionBtn.onclick = () => {
+        promptResumeSource(payload.batchId || payload.operationId, payload.sourceType);
+      };
+    }
+    return;
+  }
+
+  if (type === 'UPLOAD_QUEUED' || type === 'UPLOAD_PROGRESS') {
+    toast.style.display = 'flex';
+    if (cancelBtn) {
+      cancelBtn.style.display = 'inline-flex';
+      cancelBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (payload.batchId) {
+          fetch('/api/transfer/batch/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batchId: payload.batchId }),
+          }).catch(() => {});
+        }
+        toast.style.display = 'none';
+      };
+    }
+    if (actionContainer) actionContainer.style.display = 'none';
     const pct = payload.percentage || (payload.totalBytes > 0 ? Math.round((payload.completedBytes / payload.totalBytes) * 100) : 0);
     toastTitle.textContent = payload.rootFolderName || 'Uploading Files';
     toastPct.textContent = `${pct}%`;
     toastBar.style.width = `${pct}%`;
     toastMeta.textContent = `${payload.completedFiles || 0} / ${payload.totalFiles || 0} files (${formatBytes(payload.completedBytes || 0)} / ${formatBytes(payload.totalBytes || 0)})`;
-    toastSpeed.textContent = payload.currentFile ? `Uploading: ${payload.currentFile}` : 'Streaming...';
+    toastSpeed.textContent = payload.currentFile ? `Uploading: ${payload.currentFile}` : 'Streaming to Google Drive...';
   } else if (type === 'UPLOAD_COMPLETED') {
+    if (actionContainer) actionContainer.style.display = 'none';
     toastPct.textContent = '100%';
     toastBar.style.width = '100%';
     toastSpeed.textContent = `✓ Uploaded ${payload.completedFiles || payload.totalFiles || 0} file(s) across storage`;
@@ -203,7 +230,49 @@ async function checkActiveOperations() {
     const json = await res.json();
     if (!json.success) return;
 
-    // Check active resumable sessions
+    const toast = document.getElementById('uploadToast');
+    const toastTitle = document.getElementById('uploadToastTitle');
+    const toastPct = document.getElementById('uploadToastPct');
+    const toastBar = document.getElementById('uploadToastBar');
+    const toastMeta = document.getElementById('uploadToastMeta');
+    const toastSpeed = document.getElementById('uploadToastSpeed');
+    const cancelBtn = document.getElementById('cancelUploadBtn');
+    const actionContainer = document.getElementById('uploadToastActionContainer');
+    const actionBtn = document.getElementById('uploadResumeActionBtn');
+
+    // 2a. Check active batches (Folder uploads)
+    if (json.data.activeBatches && json.data.activeBatches.length > 0) {
+      const active = json.data.activeBatches.find(
+        (b) => b.status === 'UPLOADING' || b.status === 'PENDING' || b.status === 'WAITING_FOR_SOURCE'
+      );
+      if (active) {
+        if (active.status === 'WAITING_FOR_SOURCE') {
+          handleUploadQueueEvent('UPLOAD_PROGRESS', {
+            batchId: active.id,
+            rootFolderName: active.rootFolderName,
+            status: 'WAITING_FOR_SOURCE',
+            sourceType: 'FOLDER',
+            totalFiles: active.totalFiles,
+            completedFiles: active.completedFiles,
+            totalBytes: active.totalBytes,
+            completedBytes: active.completedBytes,
+          });
+        } else {
+          handleUploadQueueEvent('UPLOAD_PROGRESS', {
+            batchId: active.id,
+            rootFolderName: active.rootFolderName,
+            totalFiles: active.totalFiles,
+            completedFiles: active.completedFiles,
+            totalBytes: active.totalBytes,
+            completedBytes: active.completedBytes,
+            percentage: active.totalBytes > 0 ? Math.round((active.completedBytes / active.totalBytes) * 100) : 0,
+          });
+        }
+        return;
+      }
+    }
+
+    // 2b. Check active single file sessions
     const activeSessions = json.data.activeSessions || [];
     const activeResumable = activeSessions.find(
       (s) => s.status === 'EXECUTING' || s.status === 'WAITING_FOR_SOURCE' || s.status === 'RESERVED'
@@ -216,6 +285,7 @@ async function checkActiveOperations() {
       const opId = activeResumable?.operationId || savedUpload?.operationId;
       const fileName = activeResumable?.fileName || savedUpload?.fileName || 'Upload';
       const fileSize = activeResumable?.fileSize || savedUpload?.fileSize || 0;
+      const isWaiting = activeResumable?.status === 'WAITING_FOR_SOURCE';
 
       // Query latest offset from backend/Google Drive
       let offset = activeResumable?.bytesCompleted || 0;
@@ -227,61 +297,25 @@ async function checkActiveOperations() {
         }
       } catch {}
 
-      const toast = document.getElementById('uploadToast');
-      const toastTitle = document.getElementById('uploadToastTitle');
-      const toastPct = document.getElementById('uploadToastPct');
-      const toastBar = document.getElementById('uploadToastBar');
-      const toastMeta = document.getElementById('uploadToastMeta');
-      const toastSpeed = document.getElementById('uploadToastSpeed');
-      const cancelBtn = document.getElementById('cancelUploadBtn');
-      const resumeInput = document.getElementById('resumeFileInput');
-
       if (toast) {
         toast.style.display = 'flex';
-        toastTitle.textContent = `${fileName} (Paused)`;
         const pct = fileSize > 0 ? Math.round((offset / fileSize) * 100) : 0;
         toastPct.textContent = `${pct}%`;
         toastBar.style.width = `${pct}%`;
         toastMeta.textContent = `${formatBytes(offset)} / ${formatBytes(fileSize)}`;
-        toastSpeed.innerHTML = `⚠️ Click to re-select <strong>${fileName}</strong> and resume from ${formatBytes(offset)}`;
-        toast.style.cursor = 'pointer';
 
-        pendingResumeOperation = {
-          operationId: opId,
-          fileName,
-          fileSize,
-          offset,
-        };
-
-        toast.onclick = (e) => {
-          if (e.target === cancelBtn || cancelBtn?.contains(e.target)) return;
-          if (resumeInput) {
-            resumeInput.value = '';
-            resumeInput.click();
+        if (isWaiting) {
+          toastTitle.textContent = `${fileName} (Paused)`;
+          toastSpeed.textContent = '⚠️ Source file unavailable';
+          if (actionContainer && actionBtn) {
+            actionContainer.style.display = 'block';
+            actionBtn.textContent = 'Select File to Resume';
+            actionBtn.onclick = () => promptResumeSource(opId, 'FILE');
           }
-        };
-
-        if (resumeInput) {
-          resumeInput.onchange = async (e) => {
-            const pickedFile = e.target.files?.[0];
-            if (!pickedFile) return;
-
-            if (
-              pendingResumeOperation &&
-              pickedFile.name === pendingResumeOperation.fileName &&
-              Math.abs(pickedFile.size - pendingResumeOperation.fileSize) < 1024
-            ) {
-              toast.style.cursor = 'default';
-              toast.onclick = null;
-              toastTitle.textContent = pickedFile.name;
-              await uploadSingleFile(pickedFile, pendingResumeOperation.operationId, pendingResumeOperation.offset);
-              pendingResumeOperation = null;
-            } else {
-              alert(
-                `Selected file "${pickedFile.name}" (${formatBytes(pickedFile.size)}) does not match expected file "${pendingResumeOperation?.fileName}" (${formatBytes(pendingResumeOperation?.fileSize || 0)}).`
-              );
-            }
-          };
+        } else {
+          toastTitle.textContent = fileName;
+          toastSpeed.textContent = `Streaming to Google Drive... (${formatBytes(offset)})`;
+          if (actionContainer) actionContainer.style.display = 'none';
         }
 
         if (cancelBtn) {
@@ -292,30 +326,58 @@ async function checkActiveOperations() {
             sessionStorage.removeItem('smartdrive_active_op_id');
             sessionStorage.removeItem('smartdrive_active_upload');
             toast.style.display = 'none';
-            pendingResumeOperation = null;
           };
         }
-      }
-      return;
-    }
-
-    // Check active batches
-    if (json.data.activeBatches && json.data.activeBatches.length > 0) {
-      const active = json.data.activeBatches.find((b) => b.status === 'UPLOADING' || b.status === 'PENDING');
-      if (active) {
-        handleUploadQueueEvent('UPLOAD_PROGRESS', {
-          batchId: active.id,
-          rootFolderName: active.rootFolderName,
-          totalFiles: active.totalFiles,
-          completedFiles: active.completedFiles,
-          totalBytes: active.totalBytes,
-          completedBytes: active.completedBytes,
-          percentage: active.totalBytes > 0 ? Math.round((active.completedBytes / active.totalBytes) * 100) : 0,
-        });
       }
     }
   } catch (err) {
     // Non-blocking
+  }
+}
+
+async function promptResumeSource(operationId, sourceType = 'FOLDER') {
+  if (sourceType === 'FOLDER') {
+    const newPath = prompt('Enter the absolute folder path to resume this folder upload:');
+    if (!newPath) return;
+
+    try {
+      const res = await fetch(`/api/transfer/operations/${encodeURIComponent(operationId)}/resume-source`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newSourcePath: newPath.trim() }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        const actionContainer = document.getElementById('uploadToastActionContainer');
+        if (actionContainer) actionContainer.style.display = 'none';
+        checkActiveOperations();
+      } else {
+        alert(`Cannot resume folder upload:\n\n${json.error?.message || 'Verification failed.'}`);
+      }
+    } catch (err) {
+      alert(`Resume error: ${err.message}`);
+    }
+  } else {
+    const newPath = prompt('Enter the absolute file path to resume this file upload:');
+    if (!newPath) return;
+
+    try {
+      const res = await fetch(`/api/transfer/operations/${encodeURIComponent(operationId)}/resume-source`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newSourcePath: newPath.trim() }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        const actionContainer = document.getElementById('uploadToastActionContainer');
+        if (actionContainer) actionContainer.style.display = 'none';
+        checkActiveOperations();
+      } else {
+        alert(`Cannot resume file upload:\n\n${json.error?.message || 'Verification failed.'}`);
+      }
+    } catch (err) {
+      alert(`Resume error: ${err.message}`);
+    }
   }
 }
 
@@ -1193,10 +1255,35 @@ async function handleFileInput(e) {
   if (!files || files.length === 0) return;
 
   for (const file of files) {
-    await uploadSingleFile(file);
+    if (file.path) {
+      await startLocalFileUpload(file.path, file.name, currentParentId);
+    } else {
+      await uploadSingleFile(file);
+    }
   }
   e.target.value = '';
   refreshAll();
+}
+
+async function startLocalFileUpload(sourcePath, name, targetParentId) {
+  try {
+    const res = await fetch('/api/transfer/local/file/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourcePath,
+        name,
+        parentId: targetParentId,
+        conflictAction: 'RENAME',
+      }),
+    });
+    const json = await res.json();
+    if (!json.success) {
+      alert(`Upload failed: ${json.error?.message || 'Error'}`);
+    }
+  } catch (err) {
+    console.error('File upload start error:', err);
+  }
 }
 
 async function handleFolderInput(e) {
@@ -1206,13 +1293,105 @@ async function handleFolderInput(e) {
   const items = Array.from(fileList).map((f) => ({
     file: f,
     relativePath: f.webkitRelativePath || f.name,
+    path: f.path || f.webkitRelativePath || f.name,
   }));
 
-  // Determine root folder name
   const rootFolderName = items[0].relativePath.split('/')[0] || 'Uploaded Folder';
 
+  // Check if native file path is available from Electron / Chromium
+  let sourceFolder = '';
+  if (items[0].file && items[0].file.path) {
+    const full = items[0].file.path.replace(/\\/g, '/');
+    const rel = (items[0].file.webkitRelativePath || items[0].file.name).replace(/\\/g, '/');
+    if (full.endsWith(rel)) {
+      sourceFolder = full.slice(0, full.length - rel.length) + rel.split('/')[0];
+    } else {
+      sourceFolder = full;
+    }
+  }
+
+  if (!sourceFolder) {
+    // Prompt the user for the local absolute folder path for durable background upload
+    const prompted = prompt(
+      `Enter absolute local folder path for "${rootFolderName}" to enable durable background streaming:`,
+      `D:\\Photos\\${rootFolderName}`
+    );
+    if (prompted) {
+      sourceFolder = prompted.trim();
+    }
+  }
+
   e.target.value = '';
-  await uploadFolderBatch(items, rootFolderName, currentParentId);
+
+  if (sourceFolder) {
+    await startLocalFolderUpload(sourceFolder, rootFolderName, currentParentId, items);
+  } else {
+    // Fallback to in-browser upload if user cancels path prompt
+    await uploadFolderBatch(items, rootFolderName, currentParentId);
+  }
+}
+
+async function startLocalFolderUpload(sourcePath, rootFolderName, targetParentId, items = []) {
+  const toast = document.getElementById('uploadToast');
+  const toastTitle = document.getElementById('uploadToastTitle');
+  const toastPct = document.getElementById('uploadToastPct');
+  const toastBar = document.getElementById('uploadToastBar');
+  const toastMeta = document.getElementById('uploadToastMeta');
+  const toastSpeed = document.getElementById('uploadToastSpeed');
+  const cancelBtn = document.getElementById('cancelUploadBtn');
+  const actionContainer = document.getElementById('uploadToastActionContainer');
+
+  if (toastDismissTimeout) {
+    clearTimeout(toastDismissTimeout);
+    toastDismissTimeout = null;
+  }
+  if (actionContainer) actionContainer.style.display = 'none';
+
+  toast.style.display = 'flex';
+  if (cancelBtn) cancelBtn.style.display = 'inline-flex';
+  toastTitle.textContent = `Planning ${rootFolderName}...`;
+  toastPct.textContent = '0%';
+  toastBar.style.width = '0%';
+  toastMeta.textContent = '0 files';
+  toastSpeed.textContent = 'Initializing durable local stream...';
+
+  try {
+    const payload = {
+      sourcePath,
+      rootFolderName,
+      parentId: targetParentId,
+      conflictAction: 'SKIP',
+    };
+    if (items && items.length > 0) {
+      payload.items = items.map((i) => ({
+        filename: i.file ? i.file.name : i.relativePath.split('/').pop(),
+        relativePath: i.relativePath,
+        size: i.file ? i.file.size : i.size,
+        mimeType: i.file ? i.file.type : i.mimeType,
+      }));
+    }
+
+    const res = await fetch('/api/transfer/local/folder/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json();
+
+    if (!json.success) {
+      alert(`Folder upload failed to start:\n\n${json.error?.message || 'Error'}`);
+      toast.style.display = 'none';
+      return;
+    }
+
+    // Handled in background via SSE / UploadQueue
+    loadTree();
+    loadCurrentFolder();
+  } catch (err) {
+    console.error('Folder upload start error:', err);
+    alert(`Folder upload error: ${err.message}`);
+    toast.style.display = 'none';
+  }
 }
 
 async function uploadSingleFile(file, resumeOpId = null, startByte = 0) {
